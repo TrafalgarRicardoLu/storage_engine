@@ -40,3 +40,22 @@ target_link_libraries(storage_engine_tests
 )
 
 add_test(NAME storage_engine_tests COMMAND storage_engine_tests)
+
+add_executable(storage_engine_bench
+  benchmarks/storage_engine_bench.cc
+)
+
+target_link_libraries(storage_engine_bench
+  PRIVATE
+    storage_engine
+)
+
+add_test(
+  NAME storage_engine_bench_fillseq_smoke
+  COMMAND storage_engine_bench --benchmarks=fillseq --num=8 --value_size=16 --db=/tmp/storage_engine_bench_fillseq_smoke
+)
+
+add_test(
+  NAME storage_engine_bench_readrandom_smoke
+  COMMAND storage_engine_bench --benchmarks=fillseq,readrandom --num=8 --reads=8 --value_size=16 --db=/tmp/storage_engine_bench_readrandom_smoke
+)
