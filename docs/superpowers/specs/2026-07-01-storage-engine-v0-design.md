@@ -98,7 +98,44 @@ Core modules:
 - `version/`: manifest edits and current file set.
 - `util/`: status, result, coding, CRC, byte utilities.
 
-## 5. Data Model
+## 5. 3FS Style Baseline
+
+The implementation should follow the local 3FS checkout at
+`/data00/home/lujianhui.1/3FS` as the primary style reference.
+
+Repository-level style:
+
+- Use C++20, CMake, out-of-source builds, and exported compile commands.
+- Use the 3FS clang-format baseline: Google-based style, 2-space indentation,
+  120-column limit, right-aligned pointers, no bin-packed parameters or
+  arguments, and constructor initializers broken before the colon.
+- Keep `-Wall -Wextra -Werror -Wpedantic` as the target warning posture once
+  the project has a CMake skeleton.
+- Enable clang-tidy checks in the same spirit as 3FS: `bugprone`,
+  `performance`, `modernize`, `readability`, selected `cert`, selected
+  `google`, and selected `cppcoreguidelines` checks.
+- Keep changes surgical. Do not apply broad formatting rewrites to unrelated
+  files.
+
+Code-level style:
+
+- Use `#pragma once` in headers.
+- Use subsystem namespaces rather than a flat global namespace. The v0 namespace
+  should be `storage_engine`, with nested namespaces only when they clarify
+  module ownership, such as `storage_engine::wal` or `storage_engine::table`.
+- Use `PascalCase` for classes and types, `camelCase` for functions and local
+  variables, and trailing underscore for private data members.
+- Prefer `Status`, `Result<T>`, and coroutine task return types over exceptions
+  for expected storage-engine errors.
+- Prefer explicit ownership with `std::unique_ptr`, `std::shared_ptr`, and
+  move-only operation state. Raw pointers are allowed only for non-owning views
+  or C API boundaries such as `liburing`.
+- Keep coroutine usage visible at API and I/O boundaries, similar to 3FS
+  `CoTask`/`CoTryTask` style, while keeping CPU hot loops ordinary functions.
+- Keep module boundaries explicit: headers expose contracts, `.cc` files own
+  algorithms and state transitions.
+
+## 6. Data Model
 
 Keys and values are byte strings. The internal key is:
 
@@ -113,7 +150,7 @@ v0 assumes small values, from tens of bytes to a few KiB. Values are stored
 directly in the WAL, MemTable, and SSTable. There is no separate value log in
 v0.
 
-## 6. Write Path
+## 7. Write Path
 
 The write path uses multi-writer group commit.
 
@@ -135,7 +172,7 @@ The success point is after WAL sync and MemTable apply. A caller never observes
 If any WAL write or sync step fails, the whole write group fails. v0 does not
 return partial success for a write group.
 
-## 7. io_uring Rules
+## 8. io_uring Rules
 
 v0 depends directly on `liburing` and is Linux-only.
 
@@ -157,7 +194,7 @@ The v0 `UringExecutor` has one event-loop thread and one `io_uring` instance.
 All SQE submission is serialized through that executor for correctness. This is
 sufficient for v0 and keeps lifetime management simple.
 
-## 8. Coroutine Usage
+## 9. Coroutine Usage
 
 Coroutines are used for asynchronous control flow, not for CPU hot loops.
 
@@ -179,7 +216,7 @@ Non-coroutine pieces:
 This keeps the data-path algorithms ordinary and testable while still giving
 the engine an asynchronous API and direct `io_uring` integration.
 
-## 9. WAL Format
+## 10. WAL Format
 
 Each WAL record contains:
 
@@ -203,7 +240,7 @@ records. A torn or incomplete trailing record is ignored or truncated to the
 last complete record. A checksum mismatch in the middle of the WAL is a hard
 error.
 
-## 10. MemTable
+## 11. MemTable
 
 The active MemTable is an arena-backed skiplist sorted by internal key. It
 supports:
@@ -217,7 +254,7 @@ When the active MemTable reaches a configured size, it becomes immutable and a
 new active MemTable is installed. A background flush coroutine writes the
 immutable MemTable into an L0 SSTable.
 
-## 11. SSTable Format
+## 12. SSTable Format
 
 v0 uses a block-based sorted table:
 
@@ -245,7 +282,7 @@ SSTable creation is durable only after:
 4. Sync the parent directory.
 5. Append and sync the manifest edit that publishes the table.
 
-## 12. Read Path
+## 13. Read Path
 
 `Get` checks sources in freshness order:
 
@@ -260,7 +297,7 @@ key is not found.
 `Iterator` merges MemTables and SSTables by internal key order, suppresses older
 versions of the same user key, and hides deletion tombstones.
 
-## 13. Manifest and Versioning
+## 14. Manifest and Versioning
 
 The manifest is an append-only sequence of version edits. It records:
 
@@ -274,7 +311,7 @@ On open, the engine replays the manifest to reconstruct the current file set.
 If a referenced SSTable is missing or corrupt, open fails. v0 does not attempt
 silent repair.
 
-## 14. Recovery
+## 15. Recovery
 
 Open recovery:
 
@@ -289,7 +326,7 @@ After recovery completes, all writes that returned success before the crash must
 be readable unless the underlying filesystem or storage device violated sync
 semantics.
 
-## 15. Compaction v0
+## 16. Compaction v0
 
 v0 implements only the minimum compaction needed to avoid unbounded L0 growth:
 
@@ -301,7 +338,7 @@ v0 implements only the minimum compaction needed to avoid unbounded L0 growth:
 Multi-level compaction, parallel compaction, size-tiered tuning, and tombstone
 drop optimization are deferred.
 
-## 16. Testing Plan
+## 17. Testing Plan
 
 Unit tests:
 
@@ -341,7 +378,7 @@ Benchmarks:
 - Forward range scan throughput.
 - Recovery time versus WAL size.
 
-## 17. First Implementation Milestones
+## 18. First Implementation Milestones
 
 1. Build minimal C++20 project, `Status`, `Result`, coding helpers, and tests.
 2. Implement minimal coroutine `Task<T>` and `UringExecutor`.
@@ -357,7 +394,7 @@ Benchmarks:
 12. Implement minimal L0 -> L1 compaction.
 13. Add crash-simulation tests and benchmarks.
 
-## 18. Main Risks
+## 19. Main Risks
 
 - `io_uring` buffer lifetime bugs can corrupt data or crash the process.
 - Treating write completion as durability would violate the core reliability
@@ -369,7 +406,7 @@ Benchmarks:
 - Group commit can create subtle ordering bugs if sequence assignment, WAL
   encoding, and MemTable apply are not handled as one ordered batch.
 
-## 19. Recommended v0 Policy
+## 20. Recommended v0 Policy
 
 Choose correctness over raw speed until crash tests pass. The intended first
 performance optimization is larger write groups, not weaker sync semantics.
