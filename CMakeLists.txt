@@ -1,0 +1,42 @@
+cmake_minimum_required(VERSION 3.19)
+project(storage_engine VERSION 0.1.0 LANGUAGES CXX)
+
+set(CMAKE_CXX_STANDARD 20)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_CXX_EXTENSIONS OFF)
+set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
+
+add_compile_options(-Wall -Wextra -Werror -Wpedantic)
+
+find_package(Threads REQUIRED)
+
+enable_testing()
+
+add_library(storage_engine
+  src/db.cc
+  src/io/uring_executor.cc
+  src/wal.cc
+)
+
+target_include_directories(storage_engine
+  PUBLIC
+    ${PROJECT_SOURCE_DIR}/include
+  PRIVATE
+    ${PROJECT_SOURCE_DIR}/src
+)
+
+target_link_libraries(storage_engine
+  PUBLIC
+    Threads::Threads
+)
+
+add_executable(storage_engine_tests
+  tests/test_db.cc
+)
+
+target_link_libraries(storage_engine_tests
+  PRIVATE
+    storage_engine
+)
+
+add_test(NAME storage_engine_tests COMMAND storage_engine_tests)
