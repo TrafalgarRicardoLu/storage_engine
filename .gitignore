@@ -1,2 +1,28 @@
+# Build trees and CMake generated files.
 build/
+build-*/
 Testing/
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+compile_commands.json
+
+# Compiler and linker outputs.
+*.o
+*.a
+*.so
+*.dylib
+*.dll
+*.exe
+
+# Local benchmark or engine data.
+storage_engine_bench*/
+wal.log
+
+# Editor and OS-local files.
+.cache/
+.idea/
+.vscode/
+*.swp
+*~
+.DS_Store
