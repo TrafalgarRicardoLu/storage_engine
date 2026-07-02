@@ -55,6 +55,7 @@ class DB {
     uint64_t maxWriteGroupSize{0};
     uint64_t uringCompletionLoopCompletions{0};
     uint64_t writerThreadDrains{0};
+    uint64_t inlineWriterDrains{0};
     size_t memtableReservedBuckets{0};
   };
 
@@ -122,6 +123,7 @@ class DB {
   uint64_t writeGroups_{0};
   uint64_t maxWriteGroupSize_{0};
   uint64_t writerThreadDrains_{0};
+  uint64_t inlineWriterDrains_{0};
 
   mutable std::mutex writeMutex_;
   std::condition_variable writerCv_;

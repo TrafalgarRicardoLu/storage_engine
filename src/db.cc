@@ -154,6 +154,7 @@ DB::DebugStats DB::DebugStatsForTest() const {
     stats.writeGroups = writeGroups_;
     stats.maxWriteGroupSize = maxWriteGroupSize_;
     stats.writerThreadDrains = writerThreadDrains_;
+    stats.inlineWriterDrains = inlineWriterDrains_;
   }
   {
     std::lock_guard lock(memMutex_);
@@ -164,15 +165,35 @@ DB::DebugStats DB::DebugStatsForTest() const {
 }
 
 bool DB::enqueueAsyncWriter(Writer *writer) {
-  std::lock_guard lock(writeMutex_);
-  writers_.push_back(writer);
-  ++asyncWriterSuspensions_;
-
-  if (writing_ || writers_.size() > 1) {
-    groupCommitArmed_ = true;
+  {
+    std::lock_guard lock(writeMutex_);
+    ++asyncWriterSuspensions_;
+    if (!writing_ && writers_.empty() && !groupCommitArmed_) {
+      writing_ = true;
+      ++inlineWriterDrains_;
+    } else {
+      writers_.push_back(writer);
+      if (writing_ || writers_.size() > 1) {
+        groupCommitArmed_ = true;
+      }
+      writerCv_.notify_one();
+      return true;
+    }
   }
-  writerCv_.notify_one();
-  return true;
+
+  std::vector<Writer *> group{writer};
+  auto status = writeGroup(group);
+
+  {
+    std::lock_guard lock(writeMutex_);
+    ++writeGroups_;
+    maxWriteGroupSize_ = std::max(maxWriteGroupSize_, uint64_t{1});
+    writer->status = status;
+    writer->done = true;
+    writing_ = false;
+  }
+  writerCv_.notify_all();
+  return false;
 }
 
 void DB::writerLoop() {
@@ -180,7 +201,7 @@ void DB::writerLoop() {
     std::vector<Writer *> group;
     {
       std::unique_lock lock(writeMutex_);
-      writerCv_.wait(lock, [this] { return stopWriter_ || !writers_.empty(); });
+      writerCv_.wait(lock, [this] { return stopWriter_ || (!writing_ && !writers_.empty()); });
       if (stopWriter_ && writers_.empty()) {
         return;
       }
