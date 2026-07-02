@@ -195,6 +195,8 @@ void testConcurrentWritesUseGroupCommitWindow() {
   assert(stats.maxWriteGroupSize > 1);
   assert(stats.memtableApplyLocks > 0);
   assert(stats.memtableApplyLocks < kThreads);
+  assert(stats.groupCommitTargetSize == 8);
+  assert(stats.groupCommitWindowMicros == 100);
 }
 
 void testWalEncodedBatchSizeMatchesRecord() {

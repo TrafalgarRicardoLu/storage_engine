@@ -57,6 +57,8 @@ class DB {
     bool uringSqPoll{false};
     uint32_t uringEntries{8};
     uint32_t uringSqPollIdleMs{2000};
+    uint64_t groupCommitWindowMicros{100};
+    size_t groupCommitTargetSize{8};
   };
 
   struct DebugStats {
@@ -64,6 +66,8 @@ class DB {
     bool uringSqPollEnabled{false};
     uint64_t asyncWriterSuspensions{0};
     uint64_t groupCommitWaits{0};
+    uint64_t groupCommitWindowMicros{0};
+    size_t groupCommitTargetSize{0};
     uint64_t writeGroups{0};
     uint64_t maxWriteGroupSize{0};
     uint64_t uringCompletionLoopCompletions{0};
@@ -121,7 +125,7 @@ class DB {
     std::coroutine_handle<> continuation;
   };
 
-  DB(std::string path, int walFd, std::unique_ptr<io::UringExecutor> executor);
+  DB(std::string path, int walFd, std::unique_ptr<io::UringExecutor> executor, Options options);
 
   Status recover();
   bool enqueueAsyncWriter(Writer *writer);
@@ -140,6 +144,8 @@ class DB {
   uint64_t uringExecutorCreations_{0};
   uint64_t asyncWriterSuspensions_{0};
   uint64_t groupCommitWaits_{0};
+  uint64_t groupCommitWindowMicros_{100};
+  size_t groupCommitTargetSize_{8};
   uint64_t writeGroups_{0};
   uint64_t maxWriteGroupSize_{0};
   uint64_t writerThreadDrains_{0};

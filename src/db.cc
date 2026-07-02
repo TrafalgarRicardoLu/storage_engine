@@ -17,10 +17,6 @@
 namespace storage_engine {
 namespace {
 
-using namespace std::chrono_literals;
-
-constexpr auto kGroupCommitWindow = 100us;
-constexpr size_t kGroupCommitTargetSize = 8;
 constexpr size_t kInitialMemtableReserve = 4096;
 
 std::string errnoMessage(std::string_view operation) { return std::string(operation) + ": " + std::strerror(errno); }
@@ -71,7 +67,8 @@ Result<std::unique_ptr<DB>> DB::Open(std::string path, Options options) {
     return executor.error();
   }
 
-  std::unique_ptr<DB> db(new DB(std::move(path), fd, std::make_unique<io::UringExecutor>(std::move(executor).value())));
+  std::unique_ptr<DB> db(
+      new DB(std::move(path), fd, std::make_unique<io::UringExecutor>(std::move(executor).value()), options));
   db->uringExecutorCreations_ = 1;
   auto status = db->recover();
   if (!status.ok()) {
@@ -80,11 +77,13 @@ Result<std::unique_ptr<DB>> DB::Open(std::string path, Options options) {
   return db;
 }
 
-DB::DB(std::string path, int walFd, std::unique_ptr<io::UringExecutor> executor)
+DB::DB(std::string path, int walFd, std::unique_ptr<io::UringExecutor> executor, Options options)
     : path_(std::move(path)),
       walPath_((std::filesystem::path(path_) / "wal.log").string()),
       walFd_(walFd),
       executor_(std::move(executor)),
+      groupCommitWindowMicros_(options.groupCommitWindowMicros),
+      groupCommitTargetSize_(options.groupCommitTargetSize),
       walRecord_(std::make_unique<wal::EncodedBatchFragments>()) {
   memtable_.reserve(kInitialMemtableReserve);
   writerThread_ = std::thread(&DB::writerLoop, this);
@@ -160,6 +159,8 @@ DB::DebugStats DB::DebugStatsForTest() const {
     stats.uringSqPollEnabled = executorStats.sqPollEnabled;
     stats.asyncWriterSuspensions = asyncWriterSuspensions_;
     stats.groupCommitWaits = groupCommitWaits_;
+    stats.groupCommitWindowMicros = groupCommitWindowMicros_;
+    stats.groupCommitTargetSize = groupCommitTargetSize_;
     stats.writeGroups = writeGroups_;
     stats.maxWriteGroupSize = maxWriteGroupSize_;
     stats.writerThreadDrains = writerThreadDrains_;
@@ -222,8 +223,8 @@ void DB::writerLoop() {
       if (groupCommitArmed_ || writers_.size() > 1) {
         groupCommitArmed_ = false;
         ++groupCommitWaits_;
-        writerCv_.wait_for(lock, kGroupCommitWindow, [this] {
-          return stopWriter_ || writers_.size() >= kGroupCommitTargetSize;
+        writerCv_.wait_for(lock, std::chrono::microseconds(groupCommitWindowMicros_), [this] {
+          return stopWriter_ || writers_.size() >= groupCommitTargetSize_;
         });
       }
       while (!writers_.empty()) {

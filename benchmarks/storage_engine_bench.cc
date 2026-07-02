@@ -31,6 +31,8 @@ struct Options {
   uint32_t seed{301};
   bool uringSqPoll{false};
   uint32_t uringSqPollIdleMs{2000};
+  uint64_t groupCommitWindowMicros{100};
+  size_t groupCommitTargetSize{8};
 };
 
 struct Metrics {
@@ -97,7 +99,8 @@ void usage() {
   std::cerr << "usage: storage_engine_bench "
             << "--benchmarks=fillseq,fillrandom,readrandom,overwrite,concurrent_fillseq,concurrent_readrandom "
             << "--db=/tmp/storage_engine_bench --num=100000 --reads=100000 "
-            << "--threads=1 --key_size=16 --value_size=100 --uring_sqpoll=0\n";
+            << "--threads=1 --key_size=16 --value_size=100 --uring_sqpoll=0 "
+            << "--group_commit_window_us=100 --group_commit_target_size=8\n";
 }
 
 bool parseArgs(int argc, char **argv, Options &options) {
@@ -157,6 +160,15 @@ bool parseArgs(int argc, char **argv, Options &options) {
         return false;
       }
       options.uringSqPollIdleMs = static_cast<uint32_t>(parsed);
+    } else if (key == "group_commit_window_us") {
+      if (!parseUint64(value, options.groupCommitWindowMicros)) {
+        return false;
+      }
+    } else if (key == "group_commit_target_size") {
+      if (!parseUint64(value, parsed) || parsed == 0 || parsed > std::numeric_limits<size_t>::max()) {
+        return false;
+      }
+      options.groupCommitTargetSize = static_cast<size_t>(parsed);
     } else {
       std::cerr << "unknown argument: " << arg << "\n";
       usage();
@@ -233,6 +245,8 @@ std::unique_ptr<storage_engine::DB> openFreshDb(const Options &options) {
                                          .uringSqPoll = options.uringSqPoll,
                                          .uringEntries = 8,
                                          .uringSqPollIdleMs = options.uringSqPollIdleMs,
+                                         .groupCommitWindowMicros = options.groupCommitWindowMicros,
+                                         .groupCommitTargetSize = options.groupCommitTargetSize,
                                      });
   if (!db) {
     std::cerr << "open db failed: " << db.error().message() << "\n";
@@ -414,6 +428,8 @@ bool benchConcurrentFillSeq(const Options &options) {
   std::cout << "  max_write_group_size: " << stats.maxWriteGroupSize << "\n";
   std::cout << "  avg_write_group_size: " << std::fixed << std::setprecision(2) << avgWriteGroupSize << "\n";
   std::cout << "  group_commit_waits: " << stats.groupCommitWaits << "\n";
+  std::cout << "  group_commit_window_us: " << stats.groupCommitWindowMicros << "\n";
+  std::cout << "  group_commit_target_size: " << stats.groupCommitTargetSize << "\n";
   std::cout << "  inline_writer_drains: " << stats.inlineWriterDrains << "\n";
   std::cout << "  writer_thread_drains: " << stats.writerThreadDrains << "\n";
   std::cout << "  memtable_apply_locks: " << stats.memtableApplyLocks << "\n";
@@ -508,6 +524,8 @@ int main(int argc, char **argv) {
   std::cout << "reads=" << options.reads << "\n";
   std::cout << "threads=" << options.threads << "\n";
   std::cout << "uring_sqpoll=" << (options.uringSqPoll ? "true" : "false") << "\n";
+  std::cout << "group_commit_window_us=" << options.groupCommitWindowMicros << "\n";
+  std::cout << "group_commit_target_size=" << options.groupCommitTargetSize << "\n";
   std::cout << "sync=true\n\n";
 
   for (const auto &benchmark : split(options.benchmarks, ',')) {
