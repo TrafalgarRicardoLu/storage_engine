@@ -77,6 +77,12 @@ class DB {
     uint64_t walEncodeBufferReuses{0};
     size_t walEncodeFixedCapacity{0};
     size_t walEncodeIovecCapacity{0};
+    uint64_t writeGroupTimingSamples{0};
+    uint64_t writeGroupTotalMicros{0};
+    uint64_t writeGroupWalEncodeMicros{0};
+    uint64_t writeGroupDurableWaitMicros{0};
+    uint64_t writeGroupMemtableApplyMicros{0};
+    uint64_t writerResumeMicros{0};
     size_t memtableReservedBuckets{0};
   };
 
@@ -151,6 +157,12 @@ class DB {
   uint64_t writerThreadDrains_{0};
   uint64_t inlineWriterDrains_{0};
   uint64_t walEncodeBufferReuses_{0};
+  uint64_t writeGroupTimingSamples_{0};
+  uint64_t writeGroupTotalMicros_{0};
+  uint64_t writeGroupWalEncodeMicros_{0};
+  uint64_t writeGroupDurableWaitMicros_{0};
+  uint64_t writeGroupMemtableApplyMicros_{0};
+  uint64_t writerResumeMicros_{0};
 
   mutable std::mutex writeMutex_;
   std::condition_variable writerCv_;

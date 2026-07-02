@@ -424,6 +424,20 @@ bool benchConcurrentFillSeq(const Options &options) {
   auto stats = db->DebugStatsForTest();
   auto avgWriteGroupSize =
       stats.writeGroups == 0 ? 0.0 : static_cast<double>(metrics.ops) / static_cast<double>(stats.writeGroups);
+  auto avgWriteGroupTotalUs =
+      stats.writeGroupTimingSamples == 0
+          ? 0.0
+          : static_cast<double>(stats.writeGroupTotalMicros) / static_cast<double>(stats.writeGroupTimingSamples);
+  auto avgWalEncodeUs = stats.writeGroupTimingSamples == 0 ? 0.0
+                                                           : static_cast<double>(stats.writeGroupWalEncodeMicros) /
+                                                                 static_cast<double>(stats.writeGroupTimingSamples);
+  auto avgDurableWaitUs = stats.writeGroupTimingSamples == 0 ? 0.0
+                                                             : static_cast<double>(stats.writeGroupDurableWaitMicros) /
+                                                                   static_cast<double>(stats.writeGroupTimingSamples);
+  auto avgMemtableApplyUs = stats.writeGroupTimingSamples == 0
+                                ? 0.0
+                                : static_cast<double>(stats.writeGroupMemtableApplyMicros) /
+                                      static_cast<double>(stats.writeGroupTimingSamples);
   std::cout << "  write_groups: " << stats.writeGroups << "\n";
   std::cout << "  max_write_group_size: " << stats.maxWriteGroupSize << "\n";
   std::cout << "  avg_write_group_size: " << std::fixed << std::setprecision(2) << avgWriteGroupSize << "\n";
@@ -436,6 +450,12 @@ bool benchConcurrentFillSeq(const Options &options) {
   std::cout << "  wal_encode_buffer_reuses: " << stats.walEncodeBufferReuses << "\n";
   std::cout << "  wal_encode_fixed_capacity: " << stats.walEncodeFixedCapacity << "\n";
   std::cout << "  wal_encode_iovec_capacity: " << stats.walEncodeIovecCapacity << "\n";
+  std::cout << "  write_group_timing_samples: " << stats.writeGroupTimingSamples << "\n";
+  std::cout << "  avg_write_group_total_us: " << std::fixed << std::setprecision(2) << avgWriteGroupTotalUs << "\n";
+  std::cout << "  avg_wal_encode_us: " << std::fixed << std::setprecision(2) << avgWalEncodeUs << "\n";
+  std::cout << "  avg_durable_wait_us: " << std::fixed << std::setprecision(2) << avgDurableWaitUs << "\n";
+  std::cout << "  avg_memtable_apply_us: " << std::fixed << std::setprecision(2) << avgMemtableApplyUs << "\n";
+  std::cout << "  writer_resume_us: " << stats.writerResumeMicros << "\n";
   std::cout << "  threads: " << options.threads << "\n";
   return true;
 }

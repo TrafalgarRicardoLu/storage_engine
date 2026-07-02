@@ -21,6 +21,11 @@ constexpr size_t kInitialMemtableReserve = 4096;
 
 std::string errnoMessage(std::string_view operation) { return std::string(operation) + ": " + std::strerror(errno); }
 
+uint64_t elapsedMicros(std::chrono::steady_clock::time_point start, std::chrono::steady_clock::time_point end) {
+  auto micros = std::chrono::duration_cast<std::chrono::microseconds>(end - start).count();
+  return micros > 0 ? static_cast<uint64_t>(micros) : 1;
+}
+
 Result<uint64_t> fileSize(int fd) {
   struct stat st {};
   if (fstat(fd, &st) != 0) {
@@ -168,6 +173,12 @@ DB::DebugStats DB::DebugStatsForTest() const {
     stats.walEncodeBufferReuses = walEncodeBufferReuses_;
     stats.walEncodeFixedCapacity = walRecord_->fixed.capacity();
     stats.walEncodeIovecCapacity = walRecord_->iovecs.capacity();
+    stats.writeGroupTimingSamples = writeGroupTimingSamples_;
+    stats.writeGroupTotalMicros = writeGroupTotalMicros_;
+    stats.writeGroupWalEncodeMicros = writeGroupWalEncodeMicros_;
+    stats.writeGroupDurableWaitMicros = writeGroupDurableWaitMicros_;
+    stats.writeGroupMemtableApplyMicros = writeGroupMemtableApplyMicros_;
+    stats.writerResumeMicros = writerResumeMicros_;
   }
   {
     std::shared_lock lock(memMutex_);
@@ -206,7 +217,7 @@ bool DB::enqueueAsyncWriter(Writer *writer) {
     writer->done = true;
     writing_ = false;
   }
-  writerCv_.notify_all();
+  writerCv_.notify_one();
   return false;
 }
 
@@ -253,10 +264,16 @@ void DB::writerLoop() {
       }
       writing_ = false;
     }
-    writerCv_.notify_all();
+    writerCv_.notify_one();
 
+    auto resumeStart = std::chrono::steady_clock::now();
     for (auto continuation : continuations) {
       continuation.resume();
+    }
+    auto resumeEnd = std::chrono::steady_clock::now();
+    if (!continuations.empty()) {
+      std::lock_guard lock(writeMutex_);
+      writerResumeMicros_ += elapsedMicros(resumeStart, resumeEnd);
     }
   }
 }
@@ -312,6 +329,7 @@ Status DB::recover() {
 }
 
 Status DB::writeGroup(const std::vector<Writer *> &writers) {
+  auto groupStart = std::chrono::steady_clock::now();
   walBatchScratch_.clear();
   walBatchScratch_.reserve(writers.size());
   uint64_t entryCount = 0;
@@ -321,6 +339,7 @@ Status DB::writeGroup(const std::vector<Writer *> &writers) {
   }
 
   auto baseSequence = nextSequence_;
+  auto encodeStart = std::chrono::steady_clock::now();
   if (walRecord_->fixed.capacity() > 0 || walRecord_->iovecs.capacity() > 0) {
     ++walEncodeBufferReuses_;
   }
@@ -336,16 +355,30 @@ Status DB::writeGroup(const std::vector<Writer *> &writers) {
     walRecord_->size = walFallbackRecord_.size();
     iovecs = std::span<const iovec>(walRecord_->iovecs);
   }
+  auto encodeEnd = std::chrono::steady_clock::now();
 
+  auto durableStart = std::chrono::steady_clock::now();
   auto syncWrite = executor_->WritevAndFDataSync(walFd_, iovecs, walOffset_, walRecord_->size).run();
+  auto durableEnd = std::chrono::steady_clock::now();
   if (!syncWrite.ok()) {
     return syncWrite;
   }
 
+  auto applyStart = std::chrono::steady_clock::now();
   applyBatches(writers, baseSequence);
+  auto applyEnd = std::chrono::steady_clock::now();
 
   walOffset_ += walRecord_->size;
   nextSequence_ += entryCount;
+  auto groupEnd = std::chrono::steady_clock::now();
+  {
+    std::lock_guard lock(writeMutex_);
+    ++writeGroupTimingSamples_;
+    writeGroupTotalMicros_ += elapsedMicros(groupStart, groupEnd);
+    writeGroupWalEncodeMicros_ += elapsedMicros(encodeStart, encodeEnd);
+    writeGroupDurableWaitMicros_ += elapsedMicros(durableStart, durableEnd);
+    writeGroupMemtableApplyMicros_ += elapsedMicros(applyStart, applyEnd);
+  }
   return Status::Ok();
 }
 

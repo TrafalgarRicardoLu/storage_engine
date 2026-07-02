@@ -162,6 +162,11 @@ void testWalEncodeBuffersAreReusedAcrossWrites() {
   assert(stats.walEncodeFixedCapacity > 0);
   assert(stats.walEncodeIovecCapacity > 0);
   assert(stats.walEncodeBufferReuses > 0);
+  assert(stats.writeGroupTimingSamples >= 2);
+  assert(stats.writeGroupTotalMicros > 0);
+  assert(stats.writeGroupWalEncodeMicros > 0);
+  assert(stats.writeGroupDurableWaitMicros > 0);
+  assert(stats.writeGroupMemtableApplyMicros > 0);
 }
 
 void testConcurrentWritesUseGroupCommitWindow() {
