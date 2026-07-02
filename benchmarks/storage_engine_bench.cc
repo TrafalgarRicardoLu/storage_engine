@@ -81,7 +81,7 @@ bool parseInt(std::string_view value, int &out) {
 
 void usage() {
   std::cerr << "usage: storage_engine_bench "
-            << "--benchmarks=fillseq,fillrandom,readrandom,overwrite,concurrent_fillseq "
+            << "--benchmarks=fillseq,fillrandom,readrandom,overwrite,concurrent_fillseq,concurrent_readrandom "
             << "--db=/tmp/storage_engine_bench --num=100000 --reads=100000 "
             << "--threads=1 --key_size=16 --value_size=100\n";
 }
@@ -383,6 +383,51 @@ bool benchConcurrentFillSeq(const Options &options) {
   return true;
 }
 
+bool benchConcurrentReadRandom(const Options &options) {
+  auto db = openFreshDb(options);
+  if (!db || !preload(*db, options)) {
+    return false;
+  }
+
+  Metrics metrics;
+  metrics.latencyUs.resize(static_cast<size_t>(options.reads));
+  std::vector<std::thread> threads;
+  threads.reserve(static_cast<size_t>(options.threads));
+  std::atomic<uint64_t> bytes{0};
+  std::atomic<uint64_t> hits{0};
+
+  auto start = Clock::now();
+  for (int thread = 0; thread < options.threads; ++thread) {
+    threads.emplace_back([&, thread] {
+      std::mt19937_64 rng(options.seed + static_cast<uint32_t>(thread));
+      for (auto i = static_cast<uint64_t>(thread); i < options.reads; i += static_cast<uint64_t>(options.threads)) {
+        auto key = makeKey(rng() % options.num, options.keySize);
+        auto opStart = Clock::now();
+        auto value = db->Get(key);
+        if (value) {
+          hits.fetch_add(1, std::memory_order_relaxed);
+          bytes.fetch_add(key.size() + value.value().size(), std::memory_order_relaxed);
+        }
+        metrics.latencyUs[static_cast<size_t>(i)] = static_cast<uint64_t>(
+            std::chrono::duration_cast<std::chrono::microseconds>(Clock::now() - opStart).count());
+      }
+    });
+  }
+  for (auto &thread : threads) {
+    thread.join();
+  }
+
+  metrics.seconds = std::chrono::duration<double>(Clock::now() - start).count();
+  metrics.ops = options.reads;
+  metrics.bytes = bytes.load(std::memory_order_relaxed);
+  printMetrics("concurrent_readrandom", options, metrics);
+  auto hitCount = hits.load(std::memory_order_relaxed);
+  std::cout << "  hits: " << hitCount << "\n";
+  std::cout << "  misses: " << (options.reads - hitCount) << "\n";
+  std::cout << "  threads: " << options.threads << "\n";
+  return hitCount == options.reads;
+}
+
 bool runBenchmark(std::string_view name, const Options &options) {
   if (name == "fillseq") {
     return benchFillSeq(options);
@@ -398,6 +443,9 @@ bool runBenchmark(std::string_view name, const Options &options) {
   }
   if (name == "concurrent_fillseq") {
     return benchConcurrentFillSeq(options);
+  }
+  if (name == "concurrent_readrandom") {
+    return benchConcurrentReadRandom(options);
   }
 
   std::cerr << "unknown benchmark: " << name << "\n";

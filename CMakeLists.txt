@@ -64,3 +64,8 @@ add_test(
   NAME storage_engine_bench_readrandom_smoke
   COMMAND storage_engine_bench --benchmarks=fillseq,readrandom --num=8 --reads=8 --value_size=16 --db=/tmp/storage_engine_bench_readrandom_smoke
 )
+
+add_test(
+  NAME storage_engine_bench_concurrent_readrandom_smoke
+  COMMAND storage_engine_bench --benchmarks=concurrent_readrandom --num=8 --reads=8 --threads=4 --value_size=16 --db=/tmp/storage_engine_bench_concurrent_readrandom_smoke
+)

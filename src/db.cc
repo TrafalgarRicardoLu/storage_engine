@@ -157,7 +157,7 @@ DB::DebugStats DB::DebugStatsForTest() const {
     stats.inlineWriterDrains = inlineWriterDrains_;
   }
   {
-    std::lock_guard lock(memMutex_);
+    std::shared_lock lock(memMutex_);
     stats.memtableReservedBuckets = memtable_.bucket_count();
   }
   stats.uringCompletionLoopCompletions = executor_->DebugStatsForTest().completionLoopCompletions;
@@ -248,7 +248,7 @@ void DB::writerLoop() {
 }
 
 Result<std::string> DB::Get(std::string_view key) {
-  std::lock_guard lock(memMutex_);
+  std::shared_lock lock(memMutex_);
   auto iter = memtable_.find(key);
   if (iter == memtable_.end() || iter->second.deleted) {
     return Status::NotFound("key not found");
@@ -339,7 +339,7 @@ Status DB::writeGroup(const std::vector<Writer *> &writers) {
 }
 
 void DB::applyBatch(const WriteBatch &batch, uint64_t baseSequence) {
-  std::lock_guard lock(memMutex_);
+  std::unique_lock lock(memMutex_);
   uint64_t sequence = baseSequence;
   for (const auto &entry : batch.entries()) {
     auto iter = memtable_.try_emplace(entry.key).first;

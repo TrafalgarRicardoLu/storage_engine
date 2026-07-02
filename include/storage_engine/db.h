@@ -7,6 +7,7 @@
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <shared_mutex>
 #include <string>
 #include <string_view>
 #include <thread>
@@ -133,7 +134,7 @@ class DB {
   bool stopWriter_{false};
   std::thread writerThread_;
 
-  mutable std::mutex memMutex_;
+  mutable std::shared_mutex memMutex_;
   std::unordered_map<std::string, MemEntry, TransparentStringHash, TransparentStringEqual> memtable_;
 };
 
