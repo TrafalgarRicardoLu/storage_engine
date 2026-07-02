@@ -9,6 +9,7 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include <thread>
 #include <unordered_map>
 #include <vector>
 
@@ -53,6 +54,7 @@ class DB {
     uint64_t writeGroups{0};
     uint64_t maxWriteGroupSize{0};
     uint64_t uringCompletionLoopCompletions{0};
+    uint64_t writerThreadDrains{0};
     size_t memtableReservedBuckets{0};
   };
 
@@ -104,6 +106,7 @@ class DB {
 
   Status recover();
   bool enqueueAsyncWriter(Writer *writer);
+  void writerLoop();
   Status writeGroup(const std::vector<Writer *> &writers);
   void applyBatch(const WriteBatch &batch, uint64_t baseSequence);
 
@@ -118,12 +121,15 @@ class DB {
   uint64_t groupCommitWaits_{0};
   uint64_t writeGroups_{0};
   uint64_t maxWriteGroupSize_{0};
+  uint64_t writerThreadDrains_{0};
 
   mutable std::mutex writeMutex_;
   std::condition_variable writerCv_;
   std::deque<Writer *> writers_;
   bool writing_{false};
   bool groupCommitArmed_{false};
+  bool stopWriter_{false};
+  std::thread writerThread_;
 
   mutable std::mutex memMutex_;
   std::unordered_map<std::string, MemEntry, TransparentStringHash, TransparentStringEqual> memtable_;

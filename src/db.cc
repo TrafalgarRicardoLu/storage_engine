@@ -80,9 +80,18 @@ DB::DB(std::string path, int walFd, std::unique_ptr<io::UringExecutor> executor)
       walFd_(walFd),
       executor_(std::move(executor)) {
   memtable_.reserve(kInitialMemtableReserve);
+  writerThread_ = std::thread(&DB::writerLoop, this);
 }
 
 DB::~DB() {
+  {
+    std::lock_guard lock(writeMutex_);
+    stopWriter_ = true;
+  }
+  writerCv_.notify_all();
+  if (writerThread_.joinable()) {
+    writerThread_.join();
+  }
   if (walFd_ >= 0) {
     close(walFd_);
   }
@@ -144,6 +153,7 @@ DB::DebugStats DB::DebugStatsForTest() const {
     stats.groupCommitWaits = groupCommitWaits_;
     stats.writeGroups = writeGroups_;
     stats.maxWriteGroupSize = maxWriteGroupSize_;
+    stats.writerThreadDrains = writerThreadDrains_;
   }
   {
     std::lock_guard lock(memMutex_);
@@ -154,63 +164,65 @@ DB::DebugStats DB::DebugStatsForTest() const {
 }
 
 bool DB::enqueueAsyncWriter(Writer *writer) {
-  std::unique_lock lock(writeMutex_);
+  std::lock_guard lock(writeMutex_);
   writers_.push_back(writer);
   ++asyncWriterSuspensions_;
 
-  if (writing_ || writers_.front() != writer) {
+  if (writing_ || writers_.size() > 1) {
     groupCommitArmed_ = true;
-    writerCv_.notify_one();
-    return true;
   }
-  writing_ = true;
+  writerCv_.notify_one();
+  return true;
+}
 
+void DB::writerLoop() {
   for (;;) {
-    if (groupCommitArmed_ || writers_.size() > 1) {
-      groupCommitArmed_ = false;
-      ++groupCommitWaits_;
-      writerCv_.wait_for(lock, kGroupCommitWindow, [this] { return writers_.size() >= kGroupCommitTargetSize; });
-    }
-
     std::vector<Writer *> group;
-    while (!writers_.empty()) {
-      group.push_back(writers_.front());
-      writers_.pop_front();
+    {
+      std::unique_lock lock(writeMutex_);
+      writerCv_.wait(lock, [this] { return stopWriter_ || !writers_.empty(); });
+      if (stopWriter_ && writers_.empty()) {
+        return;
+      }
+      writing_ = true;
+      if (groupCommitArmed_ || writers_.size() > 1) {
+        groupCommitArmed_ = false;
+        ++groupCommitWaits_;
+        writerCv_.wait_for(lock, kGroupCommitWindow, [this] {
+          return stopWriter_ || writers_.size() >= kGroupCommitTargetSize;
+        });
+      }
+      while (!writers_.empty()) {
+        group.push_back(writers_.front());
+        writers_.pop_front();
+      }
+      ++writerThreadDrains_;
     }
-    lock.unlock();
 
     auto status = writeGroup(group);
 
     std::vector<std::coroutine_handle<>> continuations;
-    lock.lock();
-    ++writeGroups_;
-    maxWriteGroupSize_ = std::max(maxWriteGroupSize_, static_cast<uint64_t>(group.size()));
-    for (auto *groupWriter : group) {
-      groupWriter->status = status;
-      groupWriter->done = true;
-      if (groupWriter != writer && groupWriter->continuation) {
-        continuations.push_back(groupWriter->continuation);
+    {
+      std::lock_guard lock(writeMutex_);
+      ++writeGroups_;
+      maxWriteGroupSize_ = std::max(maxWriteGroupSize_, static_cast<uint64_t>(group.size()));
+      for (auto *groupWriter : group) {
+        groupWriter->status = status;
+        groupWriter->done = true;
+        if (groupWriter->continuation) {
+          continuations.push_back(groupWriter->continuation);
+        }
       }
-    }
-    if (group.size() > 1) {
-      groupCommitArmed_ = true;
-    }
-    if (writers_.empty()) {
+      if (group.size() > 1) {
+        groupCommitArmed_ = true;
+      }
       writing_ = false;
-      lock.unlock();
-      writerCv_.notify_all();
-      for (auto continuation : continuations) {
-        continuation.resume();
-      }
-      return false;
     }
-    lock.unlock();
     writerCv_.notify_all();
 
     for (auto continuation : continuations) {
       continuation.resume();
     }
-    lock.lock();
   }
 }
 

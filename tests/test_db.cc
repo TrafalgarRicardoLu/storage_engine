@@ -146,6 +146,7 @@ void testAsyncWriteUsesCoroutineCompletionAndPersistentUring() {
   assert(stats.asyncWriterSuspensions == 1);
   assert(stats.uringCompletionLoopCompletions >= 2);
   assert(stats.memtableReservedBuckets >= 4096);
+  assert(stats.writerThreadDrains > 0);
 }
 
 void testConcurrentWritesUseGroupCommitWindow() {
