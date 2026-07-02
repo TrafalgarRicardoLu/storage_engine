@@ -1,6 +1,7 @@
 #pragma once
 
 #include <condition_variable>
+#include <coroutine>
 #include <deque>
 #include <memory>
 #include <mutex>
@@ -14,6 +15,10 @@
 #include "storage_engine/task.h"
 
 namespace storage_engine {
+
+namespace io {
+class UringExecutor;
+}
 
 class WriteBatch {
  public:
@@ -40,6 +45,11 @@ class WriteBatch {
 
 class DB {
  public:
+  struct DebugStats {
+    uint64_t uringExecutorCreations{0};
+    uint64_t asyncWriterSuspensions{0};
+  };
+
   static Result<std::unique_ptr<DB>> Open(std::string path);
 
   DB(const DB &) = delete;
@@ -55,6 +65,7 @@ class DB {
   Status Delete(std::string_view key);
   Status Write(const WriteBatch &batch);
   Result<std::string> Get(std::string_view key);
+  DebugStats DebugStatsForTest() const;
 
  private:
   struct MemEntry {
@@ -63,25 +74,32 @@ class DB {
     std::string value;
   };
 
+  struct WriteAwaiter;
+
   struct Writer {
     const WriteBatch *batch;
     bool done{false};
     Status status;
+    std::coroutine_handle<> continuation;
   };
 
-  DB(std::string path, int walFd);
+  DB(std::string path, int walFd, std::unique_ptr<io::UringExecutor> executor);
 
   Status recover();
+  bool enqueueAsyncWriter(Writer *writer);
   Status writeGroup(const std::vector<Writer *> &writers);
   void applyBatch(const WriteBatch &batch, uint64_t baseSequence);
 
   std::string path_;
   std::string walPath_;
   int walFd_{-1};
+  std::unique_ptr<io::UringExecutor> executor_;
   uint64_t walOffset_{0};
   uint64_t nextSequence_{1};
+  uint64_t uringExecutorCreations_{0};
+  uint64_t asyncWriterSuspensions_{0};
 
-  std::mutex writeMutex_;
+  mutable std::mutex writeMutex_;
   std::condition_variable writerCv_;
   std::deque<Writer *> writers_;
   bool writing_{false};

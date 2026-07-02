@@ -50,7 +50,14 @@ Result<std::unique_ptr<DB>> DB::Open(std::string path) {
     return Status::IoError(errnoMessage("open WAL"));
   }
 
-  std::unique_ptr<DB> db(new DB(std::move(path), fd));
+  auto executor = io::UringExecutor::Create();
+  if (!executor) {
+    close(fd);
+    return executor.error();
+  }
+
+  std::unique_ptr<DB> db(new DB(std::move(path), fd, std::make_unique<io::UringExecutor>(std::move(executor).value())));
+  db->uringExecutorCreations_ = 1;
   auto status = db->recover();
   if (!status.ok()) {
     return status;
@@ -58,10 +65,11 @@ Result<std::unique_ptr<DB>> DB::Open(std::string path) {
   return db;
 }
 
-DB::DB(std::string path, int walFd)
+DB::DB(std::string path, int walFd, std::unique_ptr<io::UringExecutor> executor)
     : path_(std::move(path)),
       walPath_((std::filesystem::path(path_) / "wal.log").string()),
-      walFd_(walFd) {}
+      walFd_(walFd),
+      executor_(std::move(executor)) {}
 
 DB::~DB() {
   if (walFd_ >= 0) {
@@ -69,19 +77,41 @@ DB::~DB() {
   }
 }
 
+struct DB::WriteAwaiter {
+  DB *db;
+  WriteBatch batch;
+  Writer writer;
+
+  WriteAwaiter(DB *db, WriteBatch batch)
+      : db(db),
+        batch(std::move(batch)),
+        writer(Writer{
+            .batch = &this->batch,
+            .status = Status::Ok(),
+            .continuation = {},
+        }) {}
+
+  bool await_ready() const { return batch.empty(); }
+  bool await_suspend(std::coroutine_handle<> continuation) {
+    writer.continuation = continuation;
+    return db->enqueueAsyncWriter(&writer);
+  }
+  Status await_resume() { return writer.status; }
+};
+
 Task<Status> DB::PutAsync(std::string_view key, std::string_view value) {
   WriteBatch batch;
   batch.Put(key, value);
-  co_return Write(batch);
+  co_return co_await WriteAwaiter(this, std::move(batch));
 }
 
 Task<Status> DB::DeleteAsync(std::string_view key) {
   WriteBatch batch;
   batch.Delete(key);
-  co_return Write(batch);
+  co_return co_await WriteAwaiter(this, std::move(batch));
 }
 
-Task<Status> DB::WriteAsync(WriteBatch batch) { co_return Write(batch); }
+Task<Status> DB::WriteAsync(WriteBatch batch) { co_return co_await WriteAwaiter(this, std::move(batch)); }
 
 Task<Result<std::string>> DB::GetAsync(std::string_view key) { co_return Get(key); }
 
@@ -90,44 +120,64 @@ Status DB::Put(std::string_view key, std::string_view value) { return PutAsync(k
 Status DB::Delete(std::string_view key) { return DeleteAsync(key).run(); }
 
 Status DB::Write(const WriteBatch &batch) {
-  if (batch.empty()) {
-    return Status::Ok();
-  }
+  WriteBatch copy = batch;
+  return WriteAsync(std::move(copy)).run();
+}
 
-  Writer writer{
-      .batch = &batch,
-      .status = Status::Ok(),
+DB::DebugStats DB::DebugStatsForTest() const {
+  std::lock_guard lock(writeMutex_);
+  return DebugStats{
+      .uringExecutorCreations = uringExecutorCreations_,
+      .asyncWriterSuspensions = asyncWriterSuspensions_,
   };
+}
 
+bool DB::enqueueAsyncWriter(Writer *writer) {
   std::unique_lock lock(writeMutex_);
-  writers_.push_back(&writer);
+  writers_.push_back(writer);
+  ++asyncWriterSuspensions_;
 
-  while (!writer.done && (writing_ || writers_.front() != &writer)) {
-    writerCv_.wait(lock);
-  }
-  if (writer.done) {
-    return writer.status;
+  if (writing_ || writers_.front() != writer) {
+    return true;
   }
   writing_ = true;
 
-  std::vector<Writer *> group;
-  while (!writers_.empty()) {
-    group.push_back(writers_.front());
-    writers_.pop_front();
-  }
-  lock.unlock();
+  for (;;) {
+    std::vector<Writer *> group;
+    while (!writers_.empty()) {
+      group.push_back(writers_.front());
+      writers_.pop_front();
+    }
+    lock.unlock();
 
-  auto status = writeGroup(group);
+    auto status = writeGroup(group);
 
-  lock.lock();
-  for (auto *groupWriter : group) {
-    groupWriter->status = status;
-    groupWriter->done = true;
+    std::vector<std::coroutine_handle<>> continuations;
+    lock.lock();
+    for (auto *groupWriter : group) {
+      groupWriter->status = status;
+      groupWriter->done = true;
+      if (groupWriter != writer && groupWriter->continuation) {
+        continuations.push_back(groupWriter->continuation);
+      }
+    }
+    if (writers_.empty()) {
+      writing_ = false;
+      lock.unlock();
+      writerCv_.notify_all();
+      for (auto continuation : continuations) {
+        continuation.resume();
+      }
+      return false;
+    }
+    lock.unlock();
+    writerCv_.notify_all();
+
+    for (auto continuation : continuations) {
+      continuation.resume();
+    }
+    lock.lock();
   }
-  writing_ = false;
-  lock.unlock();
-  writerCv_.notify_all();
-  return writer.status;
 }
 
 Result<std::string> DB::Get(std::string_view key) {
@@ -149,13 +199,8 @@ Status DB::recover() {
     return Status::Ok();
   }
 
-  auto executor = io::UringExecutor::Create();
-  if (!executor) {
-    return executor.error();
-  }
-
   std::vector<std::byte> bytes(walOffset_);
-  auto read = executor.value().ReadAt(walFd_, std::span<std::byte>(bytes), 0).run();
+  auto read = executor_->ReadAt(walFd_, std::span<std::byte>(bytes), 0).run();
   if (!read) {
     return read.error();
   }
@@ -177,7 +222,7 @@ Status DB::recover() {
     if (ftruncate(walFd_, static_cast<off_t>(walOffset_)) != 0) {
       return Status::IoError(errnoMessage("truncate WAL"));
     }
-    auto sync = executor.value().FDataSync(walFd_).run();
+    auto sync = executor_->FDataSync(walFd_).run();
     if (!sync.ok()) {
       return sync;
     }
@@ -201,16 +246,11 @@ Status DB::writeGroup(const std::vector<Writer *> &writers) {
       .iov_len = record.size(),
   };
 
-  auto executor = io::UringExecutor::Create();
-  if (!executor) {
-    return executor.error();
-  }
-
-  auto write = executor.value().WritevAt(walFd_, std::span<const iovec>(&iov, 1), walOffset_, record.size()).run();
+  auto write = executor_->WritevAt(walFd_, std::span<const iovec>(&iov, 1), walOffset_, record.size()).run();
   if (!write.ok()) {
     return write;
   }
-  auto sync = executor.value().FDataSync(walFd_).run();
+  auto sync = executor_->FDataSync(walFd_).run();
   if (!sync.ok()) {
     return sync;
   }

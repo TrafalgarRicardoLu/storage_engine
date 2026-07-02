@@ -1,7 +1,9 @@
 #pragma once
 
+#include <condition_variable>
 #include <coroutine>
 #include <exception>
+#include <mutex>
 #include <optional>
 #include <utility>
 
@@ -13,7 +15,25 @@ class Task {
   struct promise_type {
     Task get_return_object() { return Task(std::coroutine_handle<promise_type>::from_promise(*this)); }
     std::suspend_always initial_suspend() noexcept { return {}; }
-    std::suspend_always final_suspend() noexcept { return {}; }
+
+    struct FinalAwaiter {
+      bool await_ready() noexcept { return false; }
+      std::coroutine_handle<> await_suspend(std::coroutine_handle<promise_type> handle) noexcept {
+        auto &promise = handle.promise();
+        {
+          std::lock_guard lock(promise.mutex_);
+          promise.completed_ = true;
+        }
+        promise.cv_.notify_all();
+        if (promise.continuation_) {
+          return promise.continuation_;
+        }
+        return std::noop_coroutine();
+      }
+      void await_resume() noexcept {}
+    };
+
+    FinalAwaiter final_suspend() noexcept { return {}; }
     void unhandled_exception() { exception_ = std::current_exception(); }
 
     template <typename U>
@@ -21,20 +41,36 @@ class Task {
       value_.emplace(std::forward<U>(value));
     }
 
+    void wait() {
+      std::unique_lock lock(mutex_);
+      cv_.wait(lock, [this] { return completed_; });
+    }
+
+    bool completed() {
+      std::lock_guard lock(mutex_);
+      return completed_;
+    }
+
     std::optional<T> value_;
     std::exception_ptr exception_;
+    std::coroutine_handle<> continuation_;
+    std::mutex mutex_;
+    std::condition_variable cv_;
+    bool completed_{false};
   };
 
   explicit Task(std::coroutine_handle<promise_type> handle)
       : handle_(handle) {}
   Task(Task &&other) noexcept
-      : handle_(std::exchange(other.handle_, {})) {}
+      : handle_(std::exchange(other.handle_, {})),
+        started_(std::exchange(other.started_, false)) {}
   Task &operator=(Task &&other) noexcept {
     if (this != &other) {
       if (handle_) {
         handle_.destroy();
       }
       handle_ = std::exchange(other.handle_, {});
+      started_ = std::exchange(other.started_, false);
     }
     return *this;
   }
@@ -47,28 +83,29 @@ class Task {
   }
 
   T run() {
-    drive();
+    start();
+    handle_.promise().wait();
     return takeResult();
   }
 
-  void drive() {
-    while (!handle_.done()) {
-      handle_.resume();
-    }
+  T takeResult() {
     if (handle_.promise().exception_) {
       std::rethrow_exception(handle_.promise().exception_);
     }
+    return std::move(*handle_.promise().value_);
   }
-
-  T takeResult() { return std::move(*handle_.promise().value_); }
 
   struct Awaiter {
     Task &task;
 
-    bool await_ready() const noexcept { return false; }
-    bool await_suspend(std::coroutine_handle<>) {
-      task.drive();
-      return false;
+    bool await_ready() { return task.handle_.promise().completed(); }
+    std::coroutine_handle<> await_suspend(std::coroutine_handle<> continuation) {
+      task.handle_.promise().continuation_ = continuation;
+      if (!task.started_) {
+        task.started_ = true;
+        return task.handle_;
+      }
+      return std::noop_coroutine();
     }
     T await_resume() { return task.takeResult(); }
   };
@@ -76,7 +113,15 @@ class Task {
   Awaiter operator co_await() { return Awaiter{*this}; }
 
  private:
+  void start() {
+    if (!started_) {
+      started_ = true;
+      handle_.resume();
+    }
+  }
+
   std::coroutine_handle<promise_type> handle_;
+  bool started_{false};
 };
 
 template <>
@@ -85,17 +130,50 @@ class Task<void> {
   struct promise_type {
     Task get_return_object() { return Task(std::coroutine_handle<promise_type>::from_promise(*this)); }
     std::suspend_always initial_suspend() noexcept { return {}; }
-    std::suspend_always final_suspend() noexcept { return {}; }
+
+    struct FinalAwaiter {
+      bool await_ready() noexcept { return false; }
+      std::coroutine_handle<> await_suspend(std::coroutine_handle<promise_type> handle) noexcept {
+        auto &promise = handle.promise();
+        {
+          std::lock_guard lock(promise.mutex_);
+          promise.completed_ = true;
+        }
+        promise.cv_.notify_all();
+        if (promise.continuation_) {
+          return promise.continuation_;
+        }
+        return std::noop_coroutine();
+      }
+      void await_resume() noexcept {}
+    };
+
+    FinalAwaiter final_suspend() noexcept { return {}; }
     void return_void() {}
     void unhandled_exception() { exception_ = std::current_exception(); }
 
+    void wait() {
+      std::unique_lock lock(mutex_);
+      cv_.wait(lock, [this] { return completed_; });
+    }
+
+    bool completed() {
+      std::lock_guard lock(mutex_);
+      return completed_;
+    }
+
     std::exception_ptr exception_;
+    std::coroutine_handle<> continuation_;
+    std::mutex mutex_;
+    std::condition_variable cv_;
+    bool completed_{false};
   };
 
   explicit Task(std::coroutine_handle<promise_type> handle)
       : handle_(handle) {}
   Task(Task &&other) noexcept
-      : handle_(std::exchange(other.handle_, {})) {}
+      : handle_(std::exchange(other.handle_, {})),
+        started_(std::exchange(other.started_, false)) {}
   Task(const Task &) = delete;
   Task &operator=(const Task &) = delete;
   ~Task() {
@@ -105,16 +183,23 @@ class Task<void> {
   }
 
   void run() {
-    while (!handle_.done()) {
-      handle_.resume();
-    }
+    start();
+    handle_.promise().wait();
     if (handle_.promise().exception_) {
       std::rethrow_exception(handle_.promise().exception_);
     }
   }
 
  private:
+  void start() {
+    if (!started_) {
+      started_ = true;
+      handle_.resume();
+    }
+  }
+
   std::coroutine_handle<promise_type> handle_;
+  bool started_{false};
 };
 
 }  // namespace storage_engine

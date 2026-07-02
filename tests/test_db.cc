@@ -6,6 +6,7 @@
 #include <vector>
 
 #include "storage_engine/db.h"
+#include "storage_engine/task.h"
 
 namespace {
 
@@ -124,6 +125,34 @@ void testConcurrentWritesRecover() {
   }
 }
 
+void testAsyncWriteUsesCoroutineCompletionAndPersistentUring() {
+  auto dir = freshTestDir("async_persistent_uring");
+  auto db = storage_engine::DB::Open(dir.string()).value();
+
+  storage_engine::WriteBatch batch;
+  batch.Put("async_key", "async_value");
+
+  auto status = db->WriteAsync(std::move(batch)).run();
+  assert(status.ok());
+  assert(db->Get("async_key").value() == "async_value");
+
+  auto stats = db->DebugStatsForTest();
+  assert(stats.uringExecutorCreations == 1);
+  assert(stats.asyncWriterSuspensions == 1);
+}
+
+storage_engine::Task<int> immediateValue() { co_return 7; }
+
+storage_engine::Task<int> nestedImmediateValue() {
+  auto child = immediateValue();
+  co_return co_await child;
+}
+
+void testNestedInlineTaskCompletesOnce() {
+  auto task = nestedImmediateValue();
+  assert(task.run() == 7);
+}
+
 }  // namespace
 
 int main() {
@@ -132,5 +161,7 @@ int main() {
   testWriteBatchIsAtomic();
   testRecoveryTruncatesTornWalTailBeforeAppending();
   testConcurrentWritesRecover();
+  testAsyncWriteUsesCoroutineCompletionAndPersistentUring();
+  testNestedInlineTaskCompletesOnce();
   return 0;
 }
