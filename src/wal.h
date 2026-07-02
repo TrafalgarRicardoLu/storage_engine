@@ -44,7 +44,7 @@ void EncodeBatchFragmentsInto(uint64_t baseSequence,
                               const std::vector<const WriteBatch *> &batches,
                               EncodedBatchFragments &encoded);
 size_t EncodedBatchSize(const std::vector<const WriteBatch *> &batches);
-uint32_t Crc32(std::span<const std::byte> bytes);
+uint32_t Crc32C(std::span<const std::byte> bytes);
 Result<DecodeResult> DecodeLog(std::span<const std::byte> bytes);
 
 }  // namespace storage_engine::wal

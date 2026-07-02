@@ -1,8 +1,13 @@
 #include "wal.h"
 
 #include <array>
+#include <cstdint>
 #include <cstring>
 #include <string_view>
+
+#if defined(__x86_64__) || defined(__i386__)
+#include <nmmintrin.h>
+#endif
 
 namespace storage_engine::wal {
 namespace {
@@ -66,28 +71,61 @@ bool readFixed64(std::span<const std::byte> bytes, size_t &offset, uint64_t &val
   return true;
 }
 
-constexpr std::array<uint32_t, 256> makeCrc32Table() {
+constexpr std::array<uint32_t, 256> makeCrc32cTable() {
   std::array<uint32_t, 256> table{};
   for (uint32_t i = 0; i < table.size(); ++i) {
     auto crc = i;
     for (int bit = 0; bit < 8; ++bit) {
       auto mask = 0u - (crc & 1u);
-      crc = (crc >> 1u) ^ (0xedb88320u & mask);
+      crc = (crc >> 1u) ^ (0x82f63b78u & mask);
     }
     table[i] = crc;
   }
   return table;
 }
 
-constexpr auto kCrc32Table = makeCrc32Table();
+constexpr auto kCrc32cTable = makeCrc32cTable();
 
-uint32_t extendCrc32(uint32_t crc, std::span<const std::byte> bytes) {
+uint32_t extendCrc32cSoftware(uint32_t crc, std::span<const std::byte> bytes) {
   for (auto byte : bytes) {
     auto index = (crc ^ static_cast<uint8_t>(byte)) & 0xffu;
-    crc = (crc >> 8u) ^ kCrc32Table[index];
+    crc = (crc >> 8u) ^ kCrc32cTable[index];
   }
   return crc;
 }
+
+#if defined(__x86_64__) || defined(__i386__)
+__attribute__((target("sse4.2"))) uint32_t extendCrc32cHardware(uint32_t crc, std::span<const std::byte> bytes) {
+  auto *data = bytes.data();
+  auto size = bytes.size();
+
+#if defined(__x86_64__)
+  while (size >= sizeof(uint64_t)) {
+    uint64_t chunk = 0;
+    std::memcpy(&chunk, data, sizeof(chunk));
+    crc = static_cast<uint32_t>(_mm_crc32_u64(crc, chunk));
+    data += sizeof(chunk);
+    size -= sizeof(chunk);
+  }
+#endif
+
+  while (size >= sizeof(uint32_t)) {
+    uint32_t chunk = 0;
+    std::memcpy(&chunk, data, sizeof(chunk));
+    crc = _mm_crc32_u32(crc, chunk);
+    data += sizeof(chunk);
+    size -= sizeof(chunk);
+  }
+  while (size > 0) {
+    crc = _mm_crc32_u8(crc, static_cast<uint8_t>(*data));
+    ++data;
+    --size;
+  }
+  return crc;
+}
+
+bool hasHardwareCrc32c() { return __builtin_cpu_supports("sse4.2"); }
+#endif
 
 void appendIovec(std::vector<iovec> &iovecs, const void *data, size_t size) {
   if (size == 0) {
@@ -101,7 +139,15 @@ void appendIovec(std::vector<iovec> &iovecs, const void *data, size_t size) {
 
 }  // namespace
 
-uint32_t Crc32(std::span<const std::byte> bytes) { return ~extendCrc32(0xffffffffu, bytes); }
+uint32_t Crc32C(std::span<const std::byte> bytes) {
+  auto crc = 0xffffffffu;
+#if defined(__x86_64__) || defined(__i386__)
+  if (hasHardwareCrc32c()) {
+    return ~extendCrc32cHardware(crc, bytes);
+  }
+#endif
+  return ~extendCrc32cSoftware(crc, bytes);
+}
 
 size_t EncodedBatchSize(const std::vector<const WriteBatch *> &batches) {
   size_t size = kRecordHeaderSize + kBatchHeaderSize;
@@ -139,7 +185,7 @@ void EncodeBatchFragmentsInto(uint64_t baseSequence,
 
   auto crc = 0xffffffffu;
   auto batchHeader = std::span<const std::byte>(encoded.fixed).subspan(kRecordHeaderSize, kBatchHeaderSize);
-  crc = extendCrc32(crc, batchHeader);
+  crc = extendCrc32cSoftware(crc, batchHeader);
 
   appendIovec(encoded.iovecs, encoded.fixed.data(), kRecordHeaderSize + kBatchHeaderSize);
 
@@ -156,9 +202,9 @@ void EncodeBatchFragmentsInto(uint64_t baseSequence,
           std::span<const std::byte>(reinterpret_cast<const std::byte *>(entry.key.data()), entry.key.size());
       auto valueBytes =
           std::span<const std::byte>(reinterpret_cast<const std::byte *>(entry.value.data()), entry.value.size());
-      crc = extendCrc32(crc, entryHeaderBytes);
-      crc = extendCrc32(crc, keyBytes);
-      crc = extendCrc32(crc, valueBytes);
+      crc = extendCrc32cSoftware(crc, entryHeaderBytes);
+      crc = extendCrc32cSoftware(crc, keyBytes);
+      crc = extendCrc32cSoftware(crc, valueBytes);
 
       appendIovec(encoded.iovecs, entryHeader, kEntryHeaderSize);
       appendIovec(encoded.iovecs, entry.key.data(), entry.key.size());
@@ -206,7 +252,7 @@ void EncodeBatchInto(uint64_t baseSequence,
   }
 
   auto payload = std::span<const std::byte>(record).subspan(payloadOffset);
-  writeFixed32(record, 0, Crc32(payload));
+  writeFixed32(record, 0, Crc32C(payload));
   writeFixed32(record, 4, static_cast<uint32_t>(payload.size()));
 }
 
@@ -233,7 +279,7 @@ Result<DecodeResult> DecodeLog(std::span<const std::byte> bytes) {
     }
 
     auto payload = bytes.subspan(offset, length);
-    if (Crc32(payload) != expectedCrc) {
+    if (Crc32C(payload) != expectedCrc) {
       if (recordOffset + 9 + length >= bytes.size()) {
         break;
       }

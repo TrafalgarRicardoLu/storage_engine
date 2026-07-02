@@ -36,19 +36,67 @@ Result<uint64_t> fileSize(int fd) {
 
 }  // namespace
 
+WriteBatch::WriteBatch()
+    : arena_(inlineArena_.data(), inlineArena_.size()),
+      entries_(&arena_) {}
+
+WriteBatch::WriteBatch(const WriteBatch &other)
+    : WriteBatch() {
+  for (const auto &entry : other.entries_) {
+    appendEntry(entry);
+  }
+}
+
+WriteBatch &WriteBatch::operator=(const WriteBatch &other) {
+  if (this != &other) {
+    entries_.clear();
+    for (const auto &entry : other.entries_) {
+      appendEntry(entry);
+    }
+  }
+  return *this;
+}
+
+WriteBatch::WriteBatch(WriteBatch &&other)
+    : WriteBatch() {
+  for (const auto &entry : other.entries_) {
+    appendEntry(entry);
+  }
+  other.entries_.clear();
+}
+
+WriteBatch &WriteBatch::operator=(WriteBatch &&other) {
+  if (this != &other) {
+    entries_.clear();
+    for (const auto &entry : other.entries_) {
+      appendEntry(entry);
+    }
+    other.entries_.clear();
+  }
+  return *this;
+}
+
 void WriteBatch::Put(std::string_view key, std::string_view value) {
   entries_.push_back(Entry{
       .type = Type::kPut,
-      .key = std::string(key),
-      .value = std::string(value),
+      .key = ArenaString(key, &arena_),
+      .value = ArenaString(value, &arena_),
   });
 }
 
 void WriteBatch::Delete(std::string_view key) {
   entries_.push_back(Entry{
       .type = Type::kDelete,
-      .key = std::string(key),
-      .value = {},
+      .key = ArenaString(key, &arena_),
+      .value = ArenaString(&arena_),
+  });
+}
+
+void WriteBatch::appendEntry(const Entry &entry) {
+  entries_.push_back(Entry{
+      .type = entry.type,
+      .key = ArenaString(std::string_view(entry.key.data(), entry.key.size()), &arena_),
+      .value = ArenaString(std::string_view(entry.value.data(), entry.value.size()), &arena_),
   });
 }
 
@@ -410,11 +458,12 @@ void DB::applyBatches(const std::vector<Writer *> &writers, uint64_t baseSequenc
 
 void DB::applyBatchLocked(const WriteBatch &batch, uint64_t &sequence) {
   for (const auto &entry : batch.entries()) {
-    auto iter = memtable_.try_emplace(entry.key).first;
+    auto key = std::string_view(entry.key.data(), entry.key.size());
+    auto iter = memtable_.try_emplace(std::string(key)).first;
     auto &slot = iter->second;
     slot.sequence = sequence++;
     slot.deleted = entry.type == WriteBatch::Type::kDelete;
-    slot.value = entry.value;
+    slot.value.assign(entry.value.data(), entry.value.size());
   }
 }
 

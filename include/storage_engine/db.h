@@ -1,11 +1,13 @@
 #pragma once
 
+#include <array>
 #include <condition_variable>
 #include <coroutine>
 #include <cstddef>
 #include <deque>
 #include <functional>
 #include <memory>
+#include <memory_resource>
 #include <mutex>
 #include <shared_mutex>
 #include <string>
@@ -29,6 +31,8 @@ struct EncodedBatchFragments;
 
 class WriteBatch {
  public:
+  using ArenaString = std::pmr::string;
+
   enum class Type {
     kPut = 1,
     kDelete = 2,
@@ -36,18 +40,30 @@ class WriteBatch {
 
   struct Entry {
     Type type;
-    std::string key;
-    std::string value;
+    ArenaString key;
+    ArenaString value;
   };
+
+  WriteBatch();
+  WriteBatch(const WriteBatch &other);
+  WriteBatch &operator=(const WriteBatch &other);
+  WriteBatch(WriteBatch &&other);
+  WriteBatch &operator=(WriteBatch &&other);
 
   void Put(std::string_view key, std::string_view value);
   void Delete(std::string_view key);
 
   bool empty() const { return entries_.empty(); }
-  const std::vector<Entry> &entries() const { return entries_; }
+  const std::pmr::vector<Entry> &entries() const { return entries_; }
 
  private:
-  std::vector<Entry> entries_;
+  static constexpr size_t kInlineArenaSize = 512;
+
+  void appendEntry(const Entry &entry);
+
+  std::array<std::byte, kInlineArenaSize> inlineArena_{};
+  std::pmr::monotonic_buffer_resource arena_;
+  std::pmr::vector<Entry> entries_;
 };
 
 class DB {
@@ -132,7 +148,9 @@ class DB {
 
   struct WriteAwaiter;
 
-  struct Writer {
+  static constexpr size_t kCacheLineSize = 64;
+
+  struct alignas(kCacheLineSize) Writer {
     const WriteBatch *batch;
     Status status;
     std::coroutine_handle<> continuation;

@@ -228,10 +228,23 @@ void testWalEncodedBatchSizeMatchesRecord() {
   assert(decoded.value().batches[0].batch.entries().size() == 3);
 }
 
-void testWalCrc32MatchesStandardVector() {
+void testWalCrc32cMatchesStandardVector() {
   constexpr std::string_view input = "123456789";
   auto bytes = std::span<const std::byte>(reinterpret_cast<const std::byte *>(input.data()), input.size());
-  assert(storage_engine::wal::Crc32(bytes) == 0xcbf43926u);
+  assert(storage_engine::wal::Crc32C(bytes) == 0xe3069283u);
+}
+
+void testWriteBatchCopyKeepsIndependentEntries() {
+  storage_engine::WriteBatch batch;
+  batch.Put("alpha", "one");
+
+  auto copy = batch;
+  batch.Put("beta", "two");
+
+  assert(copy.entries().size() == 1);
+  assert(copy.entries()[0].key == "alpha");
+  assert(copy.entries()[0].value == "one");
+  assert(batch.entries().size() == 2);
 }
 
 std::vector<std::byte> materializeIovecs(std::span<const iovec> iovecs) {
@@ -283,7 +296,8 @@ int main() {
   testWalEncodeBuffersAreReusedAcrossWrites();
   testConcurrentWritesUseGroupCommitWindow();
   testWalEncodedBatchSizeMatchesRecord();
-  testWalCrc32MatchesStandardVector();
+  testWalCrc32cMatchesStandardVector();
+  testWriteBatchCopyKeepsIndependentEntries();
   testWalFragmentEncodingMatchesContiguousRecord();
   testNestedInlineTaskCompletesOnce();
   return 0;
