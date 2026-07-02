@@ -48,6 +48,9 @@ class DB {
   struct DebugStats {
     uint64_t uringExecutorCreations{0};
     uint64_t asyncWriterSuspensions{0};
+    uint64_t groupCommitWaits{0};
+    uint64_t writeGroups{0};
+    uint64_t maxWriteGroupSize{0};
   };
 
   static Result<std::unique_ptr<DB>> Open(std::string path);
@@ -98,11 +101,15 @@ class DB {
   uint64_t nextSequence_{1};
   uint64_t uringExecutorCreations_{0};
   uint64_t asyncWriterSuspensions_{0};
+  uint64_t groupCommitWaits_{0};
+  uint64_t writeGroups_{0};
+  uint64_t maxWriteGroupSize_{0};
 
   mutable std::mutex writeMutex_;
   std::condition_variable writerCv_;
   std::deque<Writer *> writers_;
   bool writing_{false};
+  bool groupCommitArmed_{false};
 
   std::mutex memMutex_;
   std::unordered_map<std::string, MemEntry> memtable_;

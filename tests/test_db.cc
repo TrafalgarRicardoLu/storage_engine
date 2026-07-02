@@ -1,3 +1,4 @@
+#include <atomic>
 #include <cassert>
 #include <filesystem>
 #include <fstream>
@@ -141,6 +142,37 @@ void testAsyncWriteUsesCoroutineCompletionAndPersistentUring() {
   assert(stats.asyncWriterSuspensions == 1);
 }
 
+void testConcurrentWritesUseGroupCommitWindow() {
+  auto dir = freshTestDir("group_commit_window");
+  auto db = storage_engine::DB::Open(dir.string()).value();
+  constexpr int kThreads = 16;
+  std::atomic<int> ready{0};
+  std::atomic<bool> start{false};
+  std::vector<std::thread> threads;
+  threads.reserve(kThreads);
+
+  for (int i = 0; i < kThreads; ++i) {
+    threads.emplace_back([&db, &ready, &start, i] {
+      ready.fetch_add(1, std::memory_order_release);
+      while (!start.load(std::memory_order_acquire)) {
+        std::this_thread::yield();
+      }
+      assert(db->Put("group_key_" + std::to_string(i), "value").ok());
+    });
+  }
+  while (ready.load(std::memory_order_acquire) != kThreads) {
+    std::this_thread::yield();
+  }
+  start.store(true, std::memory_order_release);
+  for (auto &thread : threads) {
+    thread.join();
+  }
+
+  auto stats = db->DebugStatsForTest();
+  assert(stats.groupCommitWaits > 0);
+  assert(stats.maxWriteGroupSize > 1);
+}
+
 storage_engine::Task<int> immediateValue() { co_return 7; }
 
 storage_engine::Task<int> nestedImmediateValue() {
@@ -162,6 +194,7 @@ int main() {
   testRecoveryTruncatesTornWalTailBeforeAppending();
   testConcurrentWritesRecover();
   testAsyncWriteUsesCoroutineCompletionAndPersistentUring();
+  testConcurrentWritesUseGroupCommitWindow();
   testNestedInlineTaskCompletesOnce();
   return 0;
 }

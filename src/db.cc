@@ -4,6 +4,8 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
+#include <algorithm>
+#include <chrono>
 #include <cstring>
 #include <filesystem>
 #include <span>
@@ -13,6 +15,11 @@
 
 namespace storage_engine {
 namespace {
+
+using namespace std::chrono_literals;
+
+constexpr auto kGroupCommitWindow = 100us;
+constexpr size_t kGroupCommitTargetSize = 8;
 
 std::string errnoMessage(std::string_view operation) { return std::string(operation) + ": " + std::strerror(errno); }
 
@@ -129,6 +136,9 @@ DB::DebugStats DB::DebugStatsForTest() const {
   return DebugStats{
       .uringExecutorCreations = uringExecutorCreations_,
       .asyncWriterSuspensions = asyncWriterSuspensions_,
+      .groupCommitWaits = groupCommitWaits_,
+      .writeGroups = writeGroups_,
+      .maxWriteGroupSize = maxWriteGroupSize_,
   };
 }
 
@@ -138,11 +148,19 @@ bool DB::enqueueAsyncWriter(Writer *writer) {
   ++asyncWriterSuspensions_;
 
   if (writing_ || writers_.front() != writer) {
+    groupCommitArmed_ = true;
+    writerCv_.notify_one();
     return true;
   }
   writing_ = true;
 
   for (;;) {
+    if (groupCommitArmed_ || writers_.size() > 1) {
+      groupCommitArmed_ = false;
+      ++groupCommitWaits_;
+      writerCv_.wait_for(lock, kGroupCommitWindow, [this] { return writers_.size() >= kGroupCommitTargetSize; });
+    }
+
     std::vector<Writer *> group;
     while (!writers_.empty()) {
       group.push_back(writers_.front());
@@ -154,12 +172,17 @@ bool DB::enqueueAsyncWriter(Writer *writer) {
 
     std::vector<std::coroutine_handle<>> continuations;
     lock.lock();
+    ++writeGroups_;
+    maxWriteGroupSize_ = std::max(maxWriteGroupSize_, static_cast<uint64_t>(group.size()));
     for (auto *groupWriter : group) {
       groupWriter->status = status;
       groupWriter->done = true;
       if (groupWriter != writer && groupWriter->continuation) {
         continuations.push_back(groupWriter->continuation);
       }
+    }
+    if (group.size() > 1) {
+      groupCommitArmed_ = true;
     }
     if (writers_.empty()) {
       writing_ = false;
