@@ -1,6 +1,7 @@
 #include "storage_engine/db.h"
 
 #include <fcntl.h>
+#include <limits.h>
 #include <sys/stat.h>
 #include <unistd.h>
 
@@ -263,13 +264,22 @@ Status DB::writeGroup(const std::vector<Writer *> &writers) {
   }
 
   auto baseSequence = nextSequence_;
-  auto record = wal::EncodeBatch(baseSequence, batches);
-  iovec iov{
-      .iov_base = record.data(),
-      .iov_len = record.size(),
-  };
+  auto record = wal::EncodeBatchFragments(baseSequence, batches);
+  std::vector<std::byte> fallbackRecord;
+  std::span<const iovec> iovecs(record.iovecs);
+  if (record.iovecs.size() > IOV_MAX) {
+    fallbackRecord = wal::EncodeBatch(baseSequence, batches);
+    record.iovecs = {
+        iovec{
+            .iov_base = fallbackRecord.data(),
+            .iov_len = fallbackRecord.size(),
+        },
+    };
+    record.size = fallbackRecord.size();
+    iovecs = std::span<const iovec>(record.iovecs);
+  }
 
-  auto write = executor_->WritevAt(walFd_, std::span<const iovec>(&iov, 1), walOffset_, record.size()).run();
+  auto write = executor_->WritevAt(walFd_, iovecs, walOffset_, record.size).run();
   if (!write.ok()) {
     return write;
   }
@@ -284,7 +294,7 @@ Status DB::writeGroup(const std::vector<Writer *> &writers) {
     sequence += writer->batch->entries().size();
   }
 
-  walOffset_ += record.size();
+  walOffset_ += record.size;
   nextSequence_ += entryCount;
   return Status::Ok();
 }

@@ -1,5 +1,7 @@
 #pragma once
 
+#include <sys/uio.h>
+
 #include <cstddef>
 #include <cstdint>
 #include <span>
@@ -21,8 +23,22 @@ struct DecodeResult {
   size_t validBytes{0};
 };
 
+struct EncodedBatchFragments {
+  EncodedBatchFragments() = default;
+  EncodedBatchFragments(const EncodedBatchFragments &) = delete;
+  EncodedBatchFragments &operator=(const EncodedBatchFragments &) = delete;
+  EncodedBatchFragments(EncodedBatchFragments &&) noexcept = default;
+  EncodedBatchFragments &operator=(EncodedBatchFragments &&) noexcept = default;
+
+  std::vector<std::byte> fixed;
+  std::vector<iovec> iovecs;
+  size_t size{0};
+};
+
 std::vector<std::byte> EncodeBatch(uint64_t baseSequence, const std::vector<const WriteBatch *> &batches);
+EncodedBatchFragments EncodeBatchFragments(uint64_t baseSequence, const std::vector<const WriteBatch *> &batches);
 size_t EncodedBatchSize(const std::vector<const WriteBatch *> &batches);
+uint32_t Crc32(std::span<const std::byte> bytes);
 Result<DecodeResult> DecodeLog(std::span<const std::byte> bytes);
 
 }  // namespace storage_engine::wal

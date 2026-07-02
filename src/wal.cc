@@ -1,11 +1,16 @@
 #include "wal.h"
 
+#include <array>
 #include <cstring>
+#include <string_view>
 
 namespace storage_engine::wal {
 namespace {
 
 constexpr uint8_t kBatchRecord = 1;
+constexpr size_t kRecordHeaderSize = 4 + 4 + 1;
+constexpr size_t kBatchHeaderSize = 8 + 4;
+constexpr size_t kEntryHeaderSize = 1 + 4 + 4;
 
 void putFixed32(std::vector<std::byte> &out, uint32_t value) {
   for (int i = 0; i < 4; ++i) {
@@ -27,6 +32,12 @@ void putBytes(std::vector<std::byte> &out, std::string_view bytes) {
 
 void writeFixed32(std::vector<std::byte> &out, size_t offset, uint32_t value) {
   for (int i = 0; i < 4; ++i) {
+    out[offset + static_cast<size_t>(i)] = static_cast<std::byte>((value >> (i * 8)) & 0xff);
+  }
+}
+
+void writeFixed64(std::vector<std::byte> &out, size_t offset, uint64_t value) {
+  for (int i = 0; i < 8; ++i) {
     out[offset + static_cast<size_t>(i)] = static_cast<std::byte>((value >> (i * 8)) & 0xff);
   }
 }
@@ -55,28 +66,101 @@ bool readFixed64(std::span<const std::byte> bytes, size_t &offset, uint64_t &val
   return true;
 }
 
-uint32_t crc32(std::span<const std::byte> bytes) {
-  uint32_t crc = 0xffffffffu;
-  for (auto byte : bytes) {
-    crc ^= static_cast<uint8_t>(byte);
+constexpr std::array<uint32_t, 256> makeCrc32Table() {
+  std::array<uint32_t, 256> table{};
+  for (uint32_t i = 0; i < table.size(); ++i) {
+    auto crc = i;
     for (int bit = 0; bit < 8; ++bit) {
       auto mask = 0u - (crc & 1u);
       crc = (crc >> 1u) ^ (0xedb88320u & mask);
     }
+    table[i] = crc;
   }
-  return ~crc;
+  return table;
+}
+
+constexpr auto kCrc32Table = makeCrc32Table();
+
+uint32_t extendCrc32(uint32_t crc, std::span<const std::byte> bytes) {
+  for (auto byte : bytes) {
+    auto index = (crc ^ static_cast<uint8_t>(byte)) & 0xffu;
+    crc = (crc >> 8u) ^ kCrc32Table[index];
+  }
+  return crc;
+}
+
+void appendIovec(std::vector<iovec> &iovecs, const void *data, size_t size) {
+  if (size == 0) {
+    return;
+  }
+  iovecs.push_back(iovec{
+      .iov_base = const_cast<void *>(data),
+      .iov_len = size,
+  });
 }
 
 }  // namespace
 
+uint32_t Crc32(std::span<const std::byte> bytes) { return ~extendCrc32(0xffffffffu, bytes); }
+
 size_t EncodedBatchSize(const std::vector<const WriteBatch *> &batches) {
-  size_t size = 4 + 4 + 1 + 8 + 4;
+  size_t size = kRecordHeaderSize + kBatchHeaderSize;
   for (auto *batch : batches) {
     for (const auto &entry : batch->entries()) {
-      size += 1 + 4 + 4 + entry.key.size() + entry.value.size();
+      size += kEntryHeaderSize + entry.key.size() + entry.value.size();
     }
   }
   return size;
+}
+
+EncodedBatchFragments EncodeBatchFragments(uint64_t baseSequence, const std::vector<const WriteBatch *> &batches) {
+  uint32_t entryCount = 0;
+  for (auto *batch : batches) {
+    entryCount += static_cast<uint32_t>(batch->entries().size());
+  }
+
+  EncodedBatchFragments encoded;
+  encoded.size = EncodedBatchSize(batches);
+  encoded.fixed.resize(kRecordHeaderSize + kBatchHeaderSize + static_cast<size_t>(entryCount) * kEntryHeaderSize);
+  encoded.iovecs.reserve(2 + static_cast<size_t>(entryCount) * 3);
+
+  encoded.fixed[8] = static_cast<std::byte>(kBatchRecord);
+  writeFixed64(encoded.fixed, kRecordHeaderSize, baseSequence);
+  writeFixed32(encoded.fixed, kRecordHeaderSize + 8, entryCount);
+
+  auto crc = 0xffffffffu;
+  auto batchHeader = std::span<const std::byte>(encoded.fixed).subspan(kRecordHeaderSize, kBatchHeaderSize);
+  crc = extendCrc32(crc, batchHeader);
+
+  appendIovec(encoded.iovecs, encoded.fixed.data(), kRecordHeaderSize + kBatchHeaderSize);
+
+  auto entryHeaderOffset = kRecordHeaderSize + kBatchHeaderSize;
+  for (auto *batch : batches) {
+    for (const auto &entry : batch->entries()) {
+      auto *entryHeader = encoded.fixed.data() + entryHeaderOffset;
+      entryHeader[0] = static_cast<std::byte>(entry.type);
+      writeFixed32(encoded.fixed, entryHeaderOffset + 1, static_cast<uint32_t>(entry.key.size()));
+      writeFixed32(encoded.fixed, entryHeaderOffset + 5, static_cast<uint32_t>(entry.value.size()));
+
+      auto entryHeaderBytes = std::span<const std::byte>(entryHeader, kEntryHeaderSize);
+      auto keyBytes =
+          std::span<const std::byte>(reinterpret_cast<const std::byte *>(entry.key.data()), entry.key.size());
+      auto valueBytes =
+          std::span<const std::byte>(reinterpret_cast<const std::byte *>(entry.value.data()), entry.value.size());
+      crc = extendCrc32(crc, entryHeaderBytes);
+      crc = extendCrc32(crc, keyBytes);
+      crc = extendCrc32(crc, valueBytes);
+
+      appendIovec(encoded.iovecs, entryHeader, kEntryHeaderSize);
+      appendIovec(encoded.iovecs, entry.key.data(), entry.key.size());
+      appendIovec(encoded.iovecs, entry.value.data(), entry.value.size());
+      entryHeaderOffset += kEntryHeaderSize;
+    }
+  }
+
+  writeFixed32(encoded.fixed, 0, ~crc);
+  writeFixed32(encoded.fixed, 4, static_cast<uint32_t>(encoded.size - kRecordHeaderSize));
+  return encoded;
 }
 
 std::vector<std::byte> EncodeBatch(uint64_t baseSequence, const std::vector<const WriteBatch *> &batches) {
@@ -106,7 +190,7 @@ std::vector<std::byte> EncodeBatch(uint64_t baseSequence, const std::vector<cons
   }
 
   auto payload = std::span<const std::byte>(record).subspan(payloadOffset);
-  writeFixed32(record, 0, crc32(payload));
+  writeFixed32(record, 0, Crc32(payload));
   writeFixed32(record, 4, static_cast<uint32_t>(payload.size()));
   return record;
 }
@@ -134,7 +218,7 @@ Result<DecodeResult> DecodeLog(std::span<const std::byte> bytes) {
     }
 
     auto payload = bytes.subspan(offset, length);
-    if (crc32(payload) != expectedCrc) {
+    if (Crc32(payload) != expectedCrc) {
       if (recordOffset + 9 + length >= bytes.size()) {
         break;
       }

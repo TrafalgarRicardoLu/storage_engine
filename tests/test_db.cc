@@ -1,3 +1,5 @@
+#include <sys/uio.h>
+
 #include <atomic>
 #include <cassert>
 #include <filesystem>
@@ -194,6 +196,37 @@ void testWalEncodedBatchSizeMatchesRecord() {
   assert(decoded.value().batches[0].batch.entries().size() == 3);
 }
 
+void testWalCrc32MatchesStandardVector() {
+  constexpr std::string_view input = "123456789";
+  auto bytes = std::span<const std::byte>(reinterpret_cast<const std::byte *>(input.data()), input.size());
+  assert(storage_engine::wal::Crc32(bytes) == 0xcbf43926u);
+}
+
+std::vector<std::byte> materializeIovecs(std::span<const iovec> iovecs) {
+  std::vector<std::byte> bytes;
+  for (const auto &iov : iovecs) {
+    auto *data = static_cast<const std::byte *>(iov.iov_base);
+    bytes.insert(bytes.end(), data, data + iov.iov_len);
+  }
+  return bytes;
+}
+
+void testWalFragmentEncodingMatchesContiguousRecord() {
+  storage_engine::WriteBatch first;
+  first.Put("alpha", "one");
+  first.Delete("beta");
+  storage_engine::WriteBatch second;
+  second.Put("gamma", "three");
+
+  std::vector<const storage_engine::WriteBatch *> batches{&first, &second};
+  auto contiguous = storage_engine::wal::EncodeBatch(7, batches);
+  auto fragmented = storage_engine::wal::EncodeBatchFragments(7, batches);
+
+  assert(fragmented.size == contiguous.size());
+  assert(fragmented.iovecs.size() > 1);
+  assert(materializeIovecs(fragmented.iovecs) == contiguous);
+}
+
 storage_engine::Task<int> immediateValue() { co_return 7; }
 
 storage_engine::Task<int> nestedImmediateValue() {
@@ -217,6 +250,8 @@ int main() {
   testAsyncWriteUsesCoroutineCompletionAndPersistentUring();
   testConcurrentWritesUseGroupCommitWindow();
   testWalEncodedBatchSizeMatchesRecord();
+  testWalCrc32MatchesStandardVector();
+  testWalFragmentEncodingMatchesContiguousRecord();
   testNestedInlineTaskCompletesOnce();
   return 0;
 }
