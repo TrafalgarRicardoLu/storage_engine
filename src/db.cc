@@ -158,6 +158,7 @@ DB::DebugStats DB::DebugStatsForTest() const {
   }
   {
     std::shared_lock lock(memMutex_);
+    stats.memtableApplyLocks = memtableApplyLocks_;
     stats.memtableReservedBuckets = memtable_.bucket_count();
   }
   stats.uringCompletionLoopCompletions = executor_->DebugStatsForTest().completionLoopCompletions;
@@ -327,11 +328,7 @@ Status DB::writeGroup(const std::vector<Writer *> &writers) {
     return syncWrite;
   }
 
-  uint64_t sequence = baseSequence;
-  for (auto *writer : writers) {
-    applyBatch(*writer->batch, sequence);
-    sequence += writer->batch->entries().size();
-  }
+  applyBatches(writers, baseSequence);
 
   walOffset_ += record.size;
   nextSequence_ += entryCount;
@@ -340,7 +337,20 @@ Status DB::writeGroup(const std::vector<Writer *> &writers) {
 
 void DB::applyBatch(const WriteBatch &batch, uint64_t baseSequence) {
   std::unique_lock lock(memMutex_);
-  uint64_t sequence = baseSequence;
+  ++memtableApplyLocks_;
+  applyBatchLocked(batch, baseSequence);
+}
+
+void DB::applyBatches(const std::vector<Writer *> &writers, uint64_t baseSequence) {
+  std::unique_lock lock(memMutex_);
+  ++memtableApplyLocks_;
+  auto sequence = baseSequence;
+  for (auto *writer : writers) {
+    applyBatchLocked(*writer->batch, sequence);
+  }
+}
+
+void DB::applyBatchLocked(const WriteBatch &batch, uint64_t &sequence) {
   for (const auto &entry : batch.entries()) {
     auto iter = memtable_.try_emplace(entry.key).first;
     auto &slot = iter->second;

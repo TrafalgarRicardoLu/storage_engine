@@ -57,6 +57,7 @@ class DB {
     uint64_t uringCompletionLoopCompletions{0};
     uint64_t writerThreadDrains{0};
     uint64_t inlineWriterDrains{0};
+    uint64_t memtableApplyLocks{0};
     size_t memtableReservedBuckets{0};
   };
 
@@ -111,6 +112,8 @@ class DB {
   void writerLoop();
   Status writeGroup(const std::vector<Writer *> &writers);
   void applyBatch(const WriteBatch &batch, uint64_t baseSequence);
+  void applyBatches(const std::vector<Writer *> &writers, uint64_t baseSequence);
+  void applyBatchLocked(const WriteBatch &batch, uint64_t &sequence);
 
   std::string path_;
   std::string walPath_;
@@ -135,6 +138,7 @@ class DB {
   std::thread writerThread_;
 
   mutable std::shared_mutex memMutex_;
+  uint64_t memtableApplyLocks_{0};
   std::unordered_map<std::string, MemEntry, TransparentStringHash, TransparentStringEqual> memtable_;
 };
 

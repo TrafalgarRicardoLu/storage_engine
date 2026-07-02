@@ -379,6 +379,16 @@ bool benchConcurrentFillSeq(const Options &options) {
   metrics.ops = options.num;
   metrics.bytes = bytes.load(std::memory_order_relaxed);
   printMetrics("concurrent_fillseq", options, metrics);
+  auto stats = db->DebugStatsForTest();
+  auto avgWriteGroupSize =
+      stats.writeGroups == 0 ? 0.0 : static_cast<double>(metrics.ops) / static_cast<double>(stats.writeGroups);
+  std::cout << "  write_groups: " << stats.writeGroups << "\n";
+  std::cout << "  max_write_group_size: " << stats.maxWriteGroupSize << "\n";
+  std::cout << "  avg_write_group_size: " << std::fixed << std::setprecision(2) << avgWriteGroupSize << "\n";
+  std::cout << "  group_commit_waits: " << stats.groupCommitWaits << "\n";
+  std::cout << "  inline_writer_drains: " << stats.inlineWriterDrains << "\n";
+  std::cout << "  writer_thread_drains: " << stats.writerThreadDrains << "\n";
+  std::cout << "  memtable_apply_locks: " << stats.memtableApplyLocks << "\n";
   std::cout << "  threads: " << options.threads << "\n";
   return true;
 }

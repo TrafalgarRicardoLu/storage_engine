@@ -179,6 +179,8 @@ void testConcurrentWritesUseGroupCommitWindow() {
   auto stats = db->DebugStatsForTest();
   assert(stats.groupCommitWaits > 0);
   assert(stats.maxWriteGroupSize > 1);
+  assert(stats.memtableApplyLocks > 0);
+  assert(stats.memtableApplyLocks < kThreads);
 }
 
 void testWalEncodedBatchSizeMatchesRecord() {
