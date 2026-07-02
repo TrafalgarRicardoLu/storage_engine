@@ -21,6 +21,7 @@ using namespace std::chrono_literals;
 
 constexpr auto kGroupCommitWindow = 100us;
 constexpr size_t kGroupCommitTargetSize = 8;
+constexpr size_t kInitialMemtableReserve = 4096;
 
 std::string errnoMessage(std::string_view operation) { return std::string(operation) + ": " + std::strerror(errno); }
 
@@ -77,7 +78,9 @@ DB::DB(std::string path, int walFd, std::unique_ptr<io::UringExecutor> executor)
     : path_(std::move(path)),
       walPath_((std::filesystem::path(path_) / "wal.log").string()),
       walFd_(walFd),
-      executor_(std::move(executor)) {}
+      executor_(std::move(executor)) {
+  memtable_.reserve(kInitialMemtableReserve);
+}
 
 DB::~DB() {
   if (walFd_ >= 0) {
@@ -133,14 +136,21 @@ Status DB::Write(const WriteBatch &batch) {
 }
 
 DB::DebugStats DB::DebugStatsForTest() const {
-  std::lock_guard lock(writeMutex_);
-  return DebugStats{
-      .uringExecutorCreations = uringExecutorCreations_,
-      .asyncWriterSuspensions = asyncWriterSuspensions_,
-      .groupCommitWaits = groupCommitWaits_,
-      .writeGroups = writeGroups_,
-      .maxWriteGroupSize = maxWriteGroupSize_,
-  };
+  DebugStats stats;
+  {
+    std::lock_guard lock(writeMutex_);
+    stats.uringExecutorCreations = uringExecutorCreations_;
+    stats.asyncWriterSuspensions = asyncWriterSuspensions_;
+    stats.groupCommitWaits = groupCommitWaits_;
+    stats.writeGroups = writeGroups_;
+    stats.maxWriteGroupSize = maxWriteGroupSize_;
+  }
+  {
+    std::lock_guard lock(memMutex_);
+    stats.memtableReservedBuckets = memtable_.bucket_count();
+  }
+  stats.uringCompletionLoopCompletions = executor_->DebugStatsForTest().completionLoopCompletions;
+  return stats;
 }
 
 bool DB::enqueueAsyncWriter(Writer *writer) {
@@ -206,7 +216,7 @@ bool DB::enqueueAsyncWriter(Writer *writer) {
 
 Result<std::string> DB::Get(std::string_view key) {
   std::lock_guard lock(memMutex_);
-  auto iter = memtable_.find(std::string(key));
+  auto iter = memtable_.find(key);
   if (iter == memtable_.end() || iter->second.deleted) {
     return Status::NotFound("key not found");
   }
@@ -279,13 +289,9 @@ Status DB::writeGroup(const std::vector<Writer *> &writers) {
     iovecs = std::span<const iovec>(record.iovecs);
   }
 
-  auto write = executor_->WritevAt(walFd_, iovecs, walOffset_, record.size).run();
-  if (!write.ok()) {
-    return write;
-  }
-  auto sync = executor_->FDataSync(walFd_).run();
-  if (!sync.ok()) {
-    return sync;
+  auto syncWrite = executor_->WritevAndFDataSync(walFd_, iovecs, walOffset_, record.size).run();
+  if (!syncWrite.ok()) {
+    return syncWrite;
   }
 
   uint64_t sequence = baseSequence;
@@ -303,7 +309,8 @@ void DB::applyBatch(const WriteBatch &batch, uint64_t baseSequence) {
   std::lock_guard lock(memMutex_);
   uint64_t sequence = baseSequence;
   for (const auto &entry : batch.entries()) {
-    auto &slot = memtable_[entry.key];
+    auto iter = memtable_.try_emplace(entry.key).first;
+    auto &slot = iter->second;
     slot.sequence = sequence++;
     slot.deleted = entry.type == WriteBatch::Type::kDelete;
     slot.value = entry.value;

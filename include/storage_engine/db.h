@@ -3,6 +3,7 @@
 #include <condition_variable>
 #include <coroutine>
 #include <deque>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -51,6 +52,8 @@ class DB {
     uint64_t groupCommitWaits{0};
     uint64_t writeGroups{0};
     uint64_t maxWriteGroupSize{0};
+    uint64_t uringCompletionLoopCompletions{0};
+    size_t memtableReservedBuckets{0};
   };
 
   static Result<std::unique_ptr<DB>> Open(std::string path);
@@ -75,6 +78,17 @@ class DB {
     uint64_t sequence{0};
     bool deleted{false};
     std::string value;
+  };
+
+  struct TransparentStringHash {
+    using is_transparent = void;
+    size_t operator()(std::string_view value) const noexcept { return std::hash<std::string_view>{}(value); }
+    size_t operator()(const std::string &value) const noexcept { return std::hash<std::string_view>{}(value); }
+  };
+
+  struct TransparentStringEqual {
+    using is_transparent = void;
+    bool operator()(std::string_view lhs, std::string_view rhs) const noexcept { return lhs == rhs; }
   };
 
   struct WriteAwaiter;
@@ -111,8 +125,8 @@ class DB {
   bool writing_{false};
   bool groupCommitArmed_{false};
 
-  std::mutex memMutex_;
-  std::unordered_map<std::string, MemEntry> memtable_;
+  mutable std::mutex memMutex_;
+  std::unordered_map<std::string, MemEntry, TransparentStringHash, TransparentStringEqual> memtable_;
 };
 
 }  // namespace storage_engine

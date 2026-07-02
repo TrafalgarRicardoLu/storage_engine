@@ -144,6 +144,8 @@ void testAsyncWriteUsesCoroutineCompletionAndPersistentUring() {
   auto stats = db->DebugStatsForTest();
   assert(stats.uringExecutorCreations == 1);
   assert(stats.asyncWriterSuspensions == 1);
+  assert(stats.uringCompletionLoopCompletions >= 2);
+  assert(stats.memtableReservedBuckets >= 4096);
 }
 
 void testConcurrentWritesUseGroupCommitWindow() {

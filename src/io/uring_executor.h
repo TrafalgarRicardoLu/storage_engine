@@ -5,7 +5,7 @@
 
 #include <cstddef>
 #include <cstdint>
-#include <mutex>
+#include <memory>
 #include <span>
 
 #include "storage_engine/status.h"
@@ -15,55 +15,37 @@ namespace storage_engine::io {
 
 class UringExecutor {
  public:
+  struct DebugStats {
+    uint64_t completionLoopCompletions{0};
+  };
+
   static Result<UringExecutor> Create(uint32_t entries = 8);
 
   UringExecutor() = default;
-  UringExecutor(UringExecutor &&other) noexcept;
-  UringExecutor &operator=(UringExecutor &&other) noexcept;
+  UringExecutor(UringExecutor &&other) noexcept = default;
+  UringExecutor &operator=(UringExecutor &&other) noexcept = default;
   UringExecutor(const UringExecutor &) = delete;
   UringExecutor &operator=(const UringExecutor &) = delete;
   ~UringExecutor();
 
   Task<Status> WritevAt(int fd, std::span<const iovec> iovecs, uint64_t offset, size_t expectedBytes);
+  Task<Status> WritevAndFDataSync(int fd, std::span<const iovec> iovecs, uint64_t offset, size_t expectedBytes);
   Task<Result<size_t>> ReadAt(int fd, std::span<std::byte> buffer, uint64_t offset);
   Task<Status> FDataSync(int fd);
+  DebugStats DebugStatsForTest() const;
 
  private:
-  struct SubmissionRing {
-    uint32_t *head{nullptr};
-    uint32_t *tail{nullptr};
-    uint32_t *ringMask{nullptr};
-    uint32_t *ringEntries{nullptr};
-    uint32_t *flags{nullptr};
-    uint32_t *array{nullptr};
-  };
-
-  struct CompletionRing {
-    uint32_t *head{nullptr};
-    uint32_t *tail{nullptr};
-    uint32_t *ringMask{nullptr};
-    uint32_t *ringEntries{nullptr};
-    struct io_uring_cqe *cqes{nullptr};
-  };
-
-  explicit UringExecutor(int ringFd);
+  struct Operation;
+  struct State;
 
   Status init(uint32_t entries);
-  Result<int32_t> submitAndWait(struct io_uring_sqe &source);
+  Status submit(Operation *operation);
+  Status submitLinked(Operation *first, Operation *second);
+  static Status submitRaw(State &state, struct io_uring_sqe source, uint64_t userData);
+  static void completionLoop(std::shared_ptr<State> state);
   void closeRing();
 
-  int ringFd_{-1};
-  SubmissionRing sq_;
-  CompletionRing cq_;
-  struct io_uring_sqe *sqes_{nullptr};
-  void *sqRingPtr_{nullptr};
-  void *cqRingPtr_{nullptr};
-  void *sqesPtr_{nullptr};
-  size_t sqRingSize_{0};
-  size_t cqRingSize_{0};
-  size_t sqesSize_{0};
-  bool singleMmap_{false};
-  std::mutex mutex_;
+  std::shared_ptr<State> state_;
 };
 
 }  // namespace storage_engine::io
