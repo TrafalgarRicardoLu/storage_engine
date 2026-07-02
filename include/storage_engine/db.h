@@ -2,6 +2,7 @@
 
 #include <condition_variable>
 #include <coroutine>
+#include <cstddef>
 #include <deque>
 #include <functional>
 #include <memory>
@@ -21,6 +22,10 @@ namespace storage_engine {
 
 namespace io {
 class UringExecutor;
+}
+
+namespace wal {
+struct EncodedBatchFragments;
 }
 
 class WriteBatch {
@@ -58,6 +63,9 @@ class DB {
     uint64_t writerThreadDrains{0};
     uint64_t inlineWriterDrains{0};
     uint64_t memtableApplyLocks{0};
+    uint64_t walEncodeBufferReuses{0};
+    size_t walEncodeFixedCapacity{0};
+    size_t walEncodeIovecCapacity{0};
     size_t memtableReservedBuckets{0};
   };
 
@@ -128,6 +136,7 @@ class DB {
   uint64_t maxWriteGroupSize_{0};
   uint64_t writerThreadDrains_{0};
   uint64_t inlineWriterDrains_{0};
+  uint64_t walEncodeBufferReuses_{0};
 
   mutable std::mutex writeMutex_;
   std::condition_variable writerCv_;
@@ -140,6 +149,10 @@ class DB {
   mutable std::shared_mutex memMutex_;
   uint64_t memtableApplyLocks_{0};
   std::unordered_map<std::string, MemEntry, TransparentStringHash, TransparentStringEqual> memtable_;
+
+  std::unique_ptr<wal::EncodedBatchFragments> walRecord_;
+  std::vector<std::byte> walFallbackRecord_;
+  std::vector<const WriteBatch *> walBatchScratch_;
 };
 
 }  // namespace storage_engine

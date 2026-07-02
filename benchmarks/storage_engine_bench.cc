@@ -389,6 +389,9 @@ bool benchConcurrentFillSeq(const Options &options) {
   std::cout << "  inline_writer_drains: " << stats.inlineWriterDrains << "\n";
   std::cout << "  writer_thread_drains: " << stats.writerThreadDrains << "\n";
   std::cout << "  memtable_apply_locks: " << stats.memtableApplyLocks << "\n";
+  std::cout << "  wal_encode_buffer_reuses: " << stats.walEncodeBufferReuses << "\n";
+  std::cout << "  wal_encode_fixed_capacity: " << stats.walEncodeFixedCapacity << "\n";
+  std::cout << "  wal_encode_iovec_capacity: " << stats.walEncodeIovecCapacity << "\n";
   std::cout << "  threads: " << options.threads << "\n";
   return true;
 }

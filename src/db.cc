@@ -78,7 +78,8 @@ DB::DB(std::string path, int walFd, std::unique_ptr<io::UringExecutor> executor)
     : path_(std::move(path)),
       walPath_((std::filesystem::path(path_) / "wal.log").string()),
       walFd_(walFd),
-      executor_(std::move(executor)) {
+      executor_(std::move(executor)),
+      walRecord_(std::make_unique<wal::EncodedBatchFragments>()) {
   memtable_.reserve(kInitialMemtableReserve);
   writerThread_ = std::thread(&DB::writerLoop, this);
 }
@@ -155,6 +156,9 @@ DB::DebugStats DB::DebugStatsForTest() const {
     stats.maxWriteGroupSize = maxWriteGroupSize_;
     stats.writerThreadDrains = writerThreadDrains_;
     stats.inlineWriterDrains = inlineWriterDrains_;
+    stats.walEncodeBufferReuses = walEncodeBufferReuses_;
+    stats.walEncodeFixedCapacity = walRecord_->fixed.capacity();
+    stats.walEncodeIovecCapacity = walRecord_->iovecs.capacity();
   }
   {
     std::shared_lock lock(memMutex_);
@@ -299,38 +303,39 @@ Status DB::recover() {
 }
 
 Status DB::writeGroup(const std::vector<Writer *> &writers) {
-  std::vector<const WriteBatch *> batches;
-  batches.reserve(writers.size());
+  walBatchScratch_.clear();
+  walBatchScratch_.reserve(writers.size());
   uint64_t entryCount = 0;
   for (auto *writer : writers) {
-    batches.push_back(writer->batch);
+    walBatchScratch_.push_back(writer->batch);
     entryCount += writer->batch->entries().size();
   }
 
   auto baseSequence = nextSequence_;
-  auto record = wal::EncodeBatchFragments(baseSequence, batches);
-  std::vector<std::byte> fallbackRecord;
-  std::span<const iovec> iovecs(record.iovecs);
-  if (record.iovecs.size() > IOV_MAX) {
-    fallbackRecord = wal::EncodeBatch(baseSequence, batches);
-    record.iovecs = {
-        iovec{
-            .iov_base = fallbackRecord.data(),
-            .iov_len = fallbackRecord.size(),
-        },
-    };
-    record.size = fallbackRecord.size();
-    iovecs = std::span<const iovec>(record.iovecs);
+  if (walRecord_->fixed.capacity() > 0 || walRecord_->iovecs.capacity() > 0) {
+    ++walEncodeBufferReuses_;
+  }
+  wal::EncodeBatchFragmentsInto(baseSequence, walBatchScratch_, *walRecord_);
+  std::span<const iovec> iovecs(walRecord_->iovecs);
+  if (walRecord_->iovecs.size() > IOV_MAX) {
+    wal::EncodeBatchInto(baseSequence, walBatchScratch_, walFallbackRecord_);
+    walRecord_->iovecs.clear();
+    walRecord_->iovecs.push_back(iovec{
+        .iov_base = walFallbackRecord_.data(),
+        .iov_len = walFallbackRecord_.size(),
+    });
+    walRecord_->size = walFallbackRecord_.size();
+    iovecs = std::span<const iovec>(walRecord_->iovecs);
   }
 
-  auto syncWrite = executor_->WritevAndFDataSync(walFd_, iovecs, walOffset_, record.size).run();
+  auto syncWrite = executor_->WritevAndFDataSync(walFd_, iovecs, walOffset_, walRecord_->size).run();
   if (!syncWrite.ok()) {
     return syncWrite;
   }
 
   applyBatches(writers, baseSequence);
 
-  walOffset_ += record.size;
+  walOffset_ += walRecord_->size;
   nextSequence_ += entryCount;
   return Status::Ok();
 }

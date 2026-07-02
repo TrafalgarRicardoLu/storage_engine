@@ -150,6 +150,19 @@ void testAsyncWriteUsesCoroutineCompletionAndPersistentUring() {
   assert(stats.writerThreadDrains == 0);
 }
 
+void testWalEncodeBuffersAreReusedAcrossWrites() {
+  auto dir = freshTestDir("wal_encode_buffer_reuse");
+  auto db = storage_engine::DB::Open(dir.string()).value();
+
+  assert(db->Put("first", "value").ok());
+  assert(db->Put("second", "value").ok());
+
+  auto stats = db->DebugStatsForTest();
+  assert(stats.walEncodeFixedCapacity > 0);
+  assert(stats.walEncodeIovecCapacity > 0);
+  assert(stats.walEncodeBufferReuses > 0);
+}
+
 void testConcurrentWritesUseGroupCommitWindow() {
   auto dir = freshTestDir("group_commit_window");
   auto db = storage_engine::DB::Open(dir.string()).value();
@@ -254,6 +267,7 @@ int main() {
   testRecoveryTruncatesTornWalTailBeforeAppending();
   testConcurrentWritesRecover();
   testAsyncWriteUsesCoroutineCompletionAndPersistentUring();
+  testWalEncodeBuffersAreReusedAcrossWrites();
   testConcurrentWritesUseGroupCommitWindow();
   testWalEncodedBatchSizeMatchesRecord();
   testWalCrc32MatchesStandardVector();

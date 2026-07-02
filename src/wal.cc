@@ -114,13 +114,22 @@ size_t EncodedBatchSize(const std::vector<const WriteBatch *> &batches) {
 }
 
 EncodedBatchFragments EncodeBatchFragments(uint64_t baseSequence, const std::vector<const WriteBatch *> &batches) {
+  EncodedBatchFragments encoded;
+  EncodeBatchFragmentsInto(baseSequence, batches, encoded);
+  return encoded;
+}
+
+void EncodeBatchFragmentsInto(uint64_t baseSequence,
+                              const std::vector<const WriteBatch *> &batches,
+                              EncodedBatchFragments &encoded) {
   uint32_t entryCount = 0;
   for (auto *batch : batches) {
     entryCount += static_cast<uint32_t>(batch->entries().size());
   }
 
-  EncodedBatchFragments encoded;
   encoded.size = EncodedBatchSize(batches);
+  encoded.fixed.clear();
+  encoded.iovecs.clear();
   encoded.fixed.resize(kRecordHeaderSize + kBatchHeaderSize + static_cast<size_t>(entryCount) * kEntryHeaderSize);
   encoded.iovecs.reserve(2 + static_cast<size_t>(entryCount) * 3);
 
@@ -160,11 +169,18 @@ EncodedBatchFragments EncodeBatchFragments(uint64_t baseSequence, const std::vec
 
   writeFixed32(encoded.fixed, 0, ~crc);
   writeFixed32(encoded.fixed, 4, static_cast<uint32_t>(encoded.size - kRecordHeaderSize));
-  return encoded;
 }
 
 std::vector<std::byte> EncodeBatch(uint64_t baseSequence, const std::vector<const WriteBatch *> &batches) {
   std::vector<std::byte> record;
+  EncodeBatchInto(baseSequence, batches, record);
+  return record;
+}
+
+void EncodeBatchInto(uint64_t baseSequence,
+                     const std::vector<const WriteBatch *> &batches,
+                     std::vector<std::byte> &record) {
+  record.clear();
   record.reserve(EncodedBatchSize(batches));
   putFixed32(record, 0);
   putFixed32(record, 0);
@@ -192,7 +208,6 @@ std::vector<std::byte> EncodeBatch(uint64_t baseSequence, const std::vector<cons
   auto payload = std::span<const std::byte>(record).subspan(payloadOffset);
   writeFixed32(record, 0, Crc32(payload));
   writeFixed32(record, 4, static_cast<uint32_t>(payload.size()));
-  return record;
 }
 
 Result<DecodeResult> DecodeLog(std::span<const std::byte> bytes) {
