@@ -15,11 +15,19 @@ namespace storage_engine::io {
 
 class UringExecutor {
  public:
-  struct DebugStats {
-    uint64_t completionLoopCompletions{0};
+  struct Options {
+    uint32_t entries{8};
+    bool sqPoll{false};
+    uint32_t sqPollIdleMs{2000};
   };
 
-  static Result<UringExecutor> Create(uint32_t entries = 8);
+  struct DebugStats {
+    uint64_t completionLoopCompletions{0};
+    bool sqPollEnabled{false};
+  };
+
+  static Result<UringExecutor> Create();
+  static Result<UringExecutor> Create(Options options);
 
   UringExecutor() = default;
   UringExecutor(UringExecutor &&other) noexcept = default;
@@ -38,10 +46,11 @@ class UringExecutor {
   struct Operation;
   struct State;
 
-  Status init(uint32_t entries);
+  Status init(Options options);
   Status submit(Operation *operation);
   Status submitLinked(Operation *first, Operation *second);
   static Status submitRaw(State &state, struct io_uring_sqe source, uint64_t userData);
+  static Status wakeSqPollIfNeeded(State &state);
   static void completionLoop(std::shared_ptr<State> state);
   void closeRing();
 

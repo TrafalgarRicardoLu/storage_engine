@@ -148,6 +148,7 @@ void testAsyncWriteUsesCoroutineCompletionAndPersistentUring() {
   assert(stats.memtableReservedBuckets >= 4096);
   assert(stats.inlineWriterDrains > 0);
   assert(stats.writerThreadDrains == 0);
+  assert(!stats.uringSqPollEnabled);
 }
 
 void testWalEncodeBuffersAreReusedAcrossWrites() {

@@ -51,7 +51,9 @@ void WriteBatch::Delete(std::string_view key) {
   });
 }
 
-Result<std::unique_ptr<DB>> DB::Open(std::string path) {
+Result<std::unique_ptr<DB>> DB::Open(std::string path) { return Open(std::move(path), Options{}); }
+
+Result<std::unique_ptr<DB>> DB::Open(std::string path, Options options) {
   std::filesystem::create_directories(path);
   auto walPath = (std::filesystem::path(path) / "wal.log").string();
   auto fd = open(walPath.c_str(), O_CREAT | O_RDWR | O_CLOEXEC, 0644);
@@ -59,7 +61,11 @@ Result<std::unique_ptr<DB>> DB::Open(std::string path) {
     return Status::IoError(errnoMessage("open WAL"));
   }
 
-  auto executor = io::UringExecutor::Create();
+  auto executor = io::UringExecutor::Create(io::UringExecutor::Options{
+      .entries = options.uringEntries,
+      .sqPoll = options.uringSqPoll,
+      .sqPollIdleMs = options.uringSqPollIdleMs,
+  });
   if (!executor) {
     close(fd);
     return executor.error();
@@ -147,9 +153,11 @@ Status DB::Write(const WriteBatch &batch) {
 
 DB::DebugStats DB::DebugStatsForTest() const {
   DebugStats stats;
+  auto executorStats = executor_->DebugStatsForTest();
   {
     std::lock_guard lock(writeMutex_);
     stats.uringExecutorCreations = uringExecutorCreations_;
+    stats.uringSqPollEnabled = executorStats.sqPollEnabled;
     stats.asyncWriterSuspensions = asyncWriterSuspensions_;
     stats.groupCommitWaits = groupCommitWaits_;
     stats.writeGroups = writeGroups_;
@@ -165,7 +173,7 @@ DB::DebugStats DB::DebugStatsForTest() const {
     stats.memtableApplyLocks = memtableApplyLocks_;
     stats.memtableReservedBuckets = memtable_.bucket_count();
   }
-  stats.uringCompletionLoopCompletions = executor_->DebugStatsForTest().completionLoopCompletions;
+  stats.uringCompletionLoopCompletions = executorStats.completionLoopCompletions;
   return stats;
 }
 

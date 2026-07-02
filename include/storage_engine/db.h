@@ -53,8 +53,15 @@ class WriteBatch {
 
 class DB {
  public:
+  struct Options {
+    bool uringSqPoll{false};
+    uint32_t uringEntries{8};
+    uint32_t uringSqPollIdleMs{2000};
+  };
+
   struct DebugStats {
     uint64_t uringExecutorCreations{0};
+    bool uringSqPollEnabled{false};
     uint64_t asyncWriterSuspensions{0};
     uint64_t groupCommitWaits{0};
     uint64_t writeGroups{0};
@@ -70,6 +77,7 @@ class DB {
   };
 
   static Result<std::unique_ptr<DB>> Open(std::string path);
+  static Result<std::unique_ptr<DB>> Open(std::string path, Options options);
 
   DB(const DB &) = delete;
   DB &operator=(const DB &) = delete;

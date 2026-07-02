@@ -65,7 +65,23 @@ struct UringExecutor::State {
   std::thread completionThread;
   std::atomic<bool> stopping{false};
   std::atomic<uint64_t> completionLoopCompletions{0};
+  bool sqPollEnabled{false};
 };
+
+Status UringExecutor::wakeSqPollIfNeeded(State &state) {
+  if (!state.sqPollEnabled) {
+    return Status::Ok();
+  }
+  auto flags = loadAcquire(*state.sq.flags);
+  if ((flags & IORING_SQ_NEED_WAKEUP) == 0) {
+    return Status::Ok();
+  }
+  auto ret = syscall(__NR_io_uring_enter, state.ringFd, 0, 0, IORING_ENTER_SQ_WAKEUP, nullptr, 0);
+  if (ret < 0) {
+    return Status::IoError(errnoMessage("io_uring_enter sqpoll wakeup"));
+  }
+  return Status::Ok();
+}
 
 Status UringExecutor::submitRaw(State &state, io_uring_sqe source, uint64_t userData) {
   std::lock_guard lock(state.sqMutex);
@@ -83,6 +99,10 @@ Status UringExecutor::submitRaw(State &state, io_uring_sqe source, uint64_t user
   sqe->user_data = userData;
   state.sq.array[index] = index;
   storeRelease(*state.sq.tail, tail + 1);
+
+  if (state.sqPollEnabled) {
+    return wakeSqPollIfNeeded(state);
+  }
 
   auto ret = syscall(__NR_io_uring_enter, state.ringFd, 1, 0, 0, nullptr, 0);
   if (ret < 0) {
@@ -133,9 +153,11 @@ void UringExecutor::completionLoop(std::shared_ptr<State> state) {
   }
 }
 
-Result<UringExecutor> UringExecutor::Create(uint32_t entries) {
+Result<UringExecutor> UringExecutor::Create() { return Create(Options{}); }
+
+Result<UringExecutor> UringExecutor::Create(Options options) {
   UringExecutor executor;
-  auto status = executor.init(entries);
+  auto status = executor.init(options);
   if (!status.ok()) {
     return status;
   }
@@ -144,11 +166,15 @@ Result<UringExecutor> UringExecutor::Create(uint32_t entries) {
 
 UringExecutor::~UringExecutor() { closeRing(); }
 
-Status UringExecutor::init(uint32_t entries) {
+Status UringExecutor::init(Options options) {
   state_ = std::make_shared<State>();
 
   io_uring_params params{};
-  state_->ringFd = static_cast<int>(syscall(__NR_io_uring_setup, entries, &params));
+  if (options.sqPoll) {
+    params.flags |= IORING_SETUP_SQPOLL;
+    params.sq_thread_idle = options.sqPollIdleMs;
+  }
+  state_->ringFd = static_cast<int>(syscall(__NR_io_uring_setup, options.entries, &params));
   if (state_->ringFd < 0) {
     auto status = Status::IoError(errnoMessage("io_uring_setup"));
     state_.reset();
@@ -224,6 +250,7 @@ Status UringExecutor::init(uint32_t entries) {
   state_->cq.ringEntries = reinterpret_cast<uint32_t *>(cqBase + params.cq_off.ring_entries);
   state_->cq.cqes = reinterpret_cast<io_uring_cqe *>(cqBase + params.cq_off.cqes);
   state_->sqes = static_cast<io_uring_sqe *>(state_->sqesPtr);
+  state_->sqPollEnabled = options.sqPoll;
 
   state_->completionThread = std::thread(&UringExecutor::completionLoop, state_);
   return Status::Ok();
@@ -259,6 +286,10 @@ Status UringExecutor::submitLinked(Operation *first, Operation *second) {
   state_->sq.array[firstIndex] = firstIndex;
   state_->sq.array[secondIndex] = secondIndex;
   storeRelease(*state_->sq.tail, tail + 2);
+
+  if (state_->sqPollEnabled) {
+    return wakeSqPollIfNeeded(*state_);
+  }
 
   auto ret = syscall(__NR_io_uring_enter, state_->ringFd, 2, 0, 0, nullptr, 0);
   if (ret < 0) {
@@ -306,6 +337,7 @@ UringExecutor::DebugStats UringExecutor::DebugStatsForTest() const {
   }
   return DebugStats{
       .completionLoopCompletions = state_->completionLoopCompletions.load(std::memory_order_relaxed),
+      .sqPollEnabled = state_->sqPollEnabled,
   };
 }
 

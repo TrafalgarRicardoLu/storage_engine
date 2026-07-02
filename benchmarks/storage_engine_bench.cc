@@ -29,6 +29,8 @@ struct Options {
   int keySize{16};
   int valueSize{100};
   uint32_t seed{301};
+  bool uringSqPoll{false};
+  uint32_t uringSqPollIdleMs{2000};
 };
 
 struct Metrics {
@@ -79,11 +81,23 @@ bool parseInt(std::string_view value, int &out) {
   return true;
 }
 
+bool parseBool(std::string_view value, bool &out) {
+  if (value == "1" || value == "true") {
+    out = true;
+    return true;
+  }
+  if (value == "0" || value == "false") {
+    out = false;
+    return true;
+  }
+  return false;
+}
+
 void usage() {
   std::cerr << "usage: storage_engine_bench "
             << "--benchmarks=fillseq,fillrandom,readrandom,overwrite,concurrent_fillseq,concurrent_readrandom "
             << "--db=/tmp/storage_engine_bench --num=100000 --reads=100000 "
-            << "--threads=1 --key_size=16 --value_size=100\n";
+            << "--threads=1 --key_size=16 --value_size=100 --uring_sqpoll=0\n";
 }
 
 bool parseArgs(int argc, char **argv, Options &options) {
@@ -134,6 +148,15 @@ bool parseArgs(int argc, char **argv, Options &options) {
         return false;
       }
       options.seed = static_cast<uint32_t>(parsed);
+    } else if (key == "uring_sqpoll") {
+      if (!parseBool(value, options.uringSqPoll)) {
+        return false;
+      }
+    } else if (key == "uring_sqpoll_idle_ms") {
+      if (!parseUint64(value, parsed) || parsed > std::numeric_limits<uint32_t>::max()) {
+        return false;
+      }
+      options.uringSqPollIdleMs = static_cast<uint32_t>(parsed);
     } else {
       std::cerr << "unknown argument: " << arg << "\n";
       usage();
@@ -205,7 +228,12 @@ std::unique_ptr<storage_engine::DB> openFreshDb(const Options &options) {
   }
   std::filesystem::remove_all(options.db);
   std::filesystem::create_directories(options.db);
-  auto db = storage_engine::DB::Open(options.db);
+  auto db = storage_engine::DB::Open(options.db,
+                                     storage_engine::DB::Options{
+                                         .uringSqPoll = options.uringSqPoll,
+                                         .uringEntries = 8,
+                                         .uringSqPollIdleMs = options.uringSqPollIdleMs,
+                                     });
   if (!db) {
     std::cerr << "open db failed: " << db.error().message() << "\n";
     return nullptr;
@@ -479,6 +507,7 @@ int main(int argc, char **argv) {
   std::cout << "num=" << options.num << "\n";
   std::cout << "reads=" << options.reads << "\n";
   std::cout << "threads=" << options.threads << "\n";
+  std::cout << "uring_sqpoll=" << (options.uringSqPoll ? "true" : "false") << "\n";
   std::cout << "sync=true\n\n";
 
   for (const auto &benchmark : split(options.benchmarks, ',')) {
