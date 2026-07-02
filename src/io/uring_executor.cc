@@ -32,6 +32,34 @@ struct UringExecutor::Operation {
   int32_t result{0};
 };
 
+struct UringExecutor::SingleOperationAwaiter {
+  UringExecutor *executor;
+  Operation operation;
+  const char *submitError;
+  const char *operationError;
+  bool submitFailed{false};
+
+  bool await_ready() const { return false; }
+  bool await_suspend(std::coroutine_handle<> continuation) {
+    operation.continuation = continuation;
+    auto status = executor->submit(&operation);
+    if (!status.ok()) {
+      submitFailed = true;
+      return false;
+    }
+    return true;
+  }
+  Result<int32_t> await_resume() {
+    if (submitFailed) {
+      return Status::IoError(submitError);
+    }
+    if (operation.result < 0) {
+      return Status::IoError(std::string(operationError) + ": " + std::strerror(-operation.result));
+    }
+    return operation.result;
+  }
+};
+
 struct UringExecutor::State {
   struct SubmissionRing {
     uint32_t *head{nullptr};
@@ -411,32 +439,6 @@ Task<Status> UringExecutor::WritevAndFDataSync(int fd,
 }
 
 Task<Result<size_t>> UringExecutor::ReadAt(int fd, std::span<std::byte> buffer, uint64_t offset) {
-  struct Awaiter {
-    UringExecutor *executor;
-    Operation operation;
-    bool submitFailed{false};
-
-    bool await_ready() const { return false; }
-    bool await_suspend(std::coroutine_handle<> continuation) {
-      operation.continuation = continuation;
-      auto status = executor->submit(&operation);
-      if (!status.ok()) {
-        submitFailed = true;
-        return false;
-      }
-      return true;
-    }
-    Result<size_t> await_resume() {
-      if (submitFailed) {
-        return Status::IoError("io_uring readv submit failed");
-      }
-      if (operation.result < 0) {
-        return Status::IoError("io_uring readv failed: " + std::string(std::strerror(-operation.result)));
-      }
-      return static_cast<size_t>(operation.result);
-    }
-  };
-
   iovec iov{
       .iov_base = buffer.data(),
       .iov_len = buffer.size(),
@@ -448,7 +450,7 @@ Task<Result<size_t>> UringExecutor::ReadAt(int fd, std::span<std::byte> buffer, 
   sqe.len = 1;
   sqe.off = offset;
 
-  co_return co_await Awaiter{
+  auto result = co_await SingleOperationAwaiter{
       .executor = this,
       .operation =
           Operation{
@@ -456,43 +458,23 @@ Task<Result<size_t>> UringExecutor::ReadAt(int fd, std::span<std::byte> buffer, 
               .continuation = {},
               .result = 0,
           },
+      .submitError = "io_uring readv submit failed",
+      .operationError = "io_uring readv failed",
       .submitFailed = false,
   };
+  if (!result) {
+    co_return result.error();
+  }
+  co_return static_cast<size_t>(result.value());
 }
 
 Task<Status> UringExecutor::FDataSync(int fd) {
-  struct Awaiter {
-    UringExecutor *executor;
-    Operation operation;
-    bool submitFailed{false};
-
-    bool await_ready() const { return false; }
-    bool await_suspend(std::coroutine_handle<> continuation) {
-      operation.continuation = continuation;
-      auto status = executor->submit(&operation);
-      if (!status.ok()) {
-        submitFailed = true;
-        return false;
-      }
-      return true;
-    }
-    Status await_resume() {
-      if (submitFailed) {
-        return Status::IoError("io_uring fdatasync submit failed");
-      }
-      if (operation.result < 0) {
-        return Status::IoError("io_uring fdatasync failed: " + std::string(std::strerror(-operation.result)));
-      }
-      return Status::Ok();
-    }
-  };
-
   io_uring_sqe sqe{};
   sqe.opcode = IORING_OP_FSYNC;
   sqe.fd = fd;
   sqe.fsync_flags = IORING_FSYNC_DATASYNC;
 
-  co_return co_await Awaiter{
+  auto result = co_await SingleOperationAwaiter{
       .executor = this,
       .operation =
           Operation{
@@ -500,8 +482,14 @@ Task<Status> UringExecutor::FDataSync(int fd) {
               .continuation = {},
               .result = 0,
           },
+      .submitError = "io_uring fdatasync submit failed",
+      .operationError = "io_uring fdatasync failed",
       .submitFailed = false,
   };
+  if (!result) {
+    co_return result.error();
+  }
+  co_return Status::Ok();
 }
 
 }  // namespace storage_engine::io

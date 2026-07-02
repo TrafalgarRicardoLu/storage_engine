@@ -43,6 +43,7 @@ class UringExecutor {
 
  private:
   struct Operation;
+  struct SingleOperationAwaiter;
   struct State;
 
   Status init(Options options);

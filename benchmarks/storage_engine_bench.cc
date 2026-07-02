@@ -228,11 +228,10 @@ void recordLatency(std::vector<uint64_t> &latencyUs, Clock::time_point start) {
   latencyUs.push_back(static_cast<uint64_t>(elapsed));
 }
 
-double percentile(std::vector<uint64_t> values, double pct) {
+double percentileFromSorted(const std::vector<uint64_t> &values, double pct) {
   if (values.empty()) {
     return 0;
   }
-  std::sort(values.begin(), values.end());
   auto index = static_cast<size_t>((pct / 100.0) * static_cast<double>(values.size() - 1));
   return static_cast<double>(values[index]);
 }
@@ -241,6 +240,8 @@ void printMetrics(std::string_view name, const Options &options, const Metrics &
   auto opsPerSec = metrics.seconds > 0 ? static_cast<double>(metrics.ops) / metrics.seconds : 0;
   auto mbPerSec = metrics.seconds > 0 ? static_cast<double>(metrics.bytes) / (1024.0 * 1024.0) / metrics.seconds : 0;
   auto avgUs = metrics.ops > 0 ? metrics.seconds * 1000000.0 / static_cast<double>(metrics.ops) : 0;
+  auto latencyUs = metrics.latencyUs;
+  std::sort(latencyUs.begin(), latencyUs.end());
 
   std::cout << name << ":\n";
   std::cout << "  ops: " << metrics.ops << "\n";
@@ -248,9 +249,9 @@ void printMetrics(std::string_view name, const Options &options, const Metrics &
   std::cout << "  ops/sec: " << std::fixed << std::setprecision(2) << opsPerSec << "\n";
   std::cout << "  mb/sec: " << std::fixed << std::setprecision(2) << mbPerSec << "\n";
   std::cout << "  avg_us/op: " << std::fixed << std::setprecision(2) << avgUs << "\n";
-  std::cout << "  p50_us: " << percentile(metrics.latencyUs, 50) << "\n";
-  std::cout << "  p95_us: " << percentile(metrics.latencyUs, 95) << "\n";
-  std::cout << "  p99_us: " << percentile(metrics.latencyUs, 99) << "\n";
+  std::cout << "  p50_us: " << percentileFromSorted(latencyUs, 50) << "\n";
+  std::cout << "  p95_us: " << percentileFromSorted(latencyUs, 95) << "\n";
+  std::cout << "  p99_us: " << percentileFromSorted(latencyUs, 99) << "\n";
   std::cout << "  key_size: " << options.keySize << "\n";
   std::cout << "  value_size: " << options.valueSize << "\n";
 }
