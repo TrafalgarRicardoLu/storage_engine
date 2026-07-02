@@ -135,12 +135,11 @@ class DB {
 
   struct Writer {
     const WriteBatch *batch;
-    bool done{false};
     Status status;
     std::coroutine_handle<> continuation;
   };
 
-  DB(std::string path, int walFd, std::unique_ptr<io::UringExecutor> executor, Options options);
+  DB(int walFd, std::unique_ptr<io::UringExecutor> executor, Options options);
 
   Status recover();
   bool enqueueAsyncWriter(Writer *writer);
@@ -150,8 +149,6 @@ class DB {
   void applyBatches(const std::vector<Writer *> &writers, uint64_t baseSequence);
   void applyBatchLocked(const WriteBatch &batch, uint64_t &sequence);
 
-  std::string path_;
-  std::string walPath_;
   int walFd_{-1};
   std::unique_ptr<io::UringExecutor> executor_;
   uint64_t walOffset_{0};

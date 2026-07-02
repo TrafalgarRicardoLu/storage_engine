@@ -341,61 +341,6 @@ UringExecutor::DebugStats UringExecutor::DebugStatsForTest() const {
   };
 }
 
-Task<Status> UringExecutor::WritevAt(int fd, std::span<const iovec> iovecs, uint64_t offset, size_t expectedBytes) {
-  struct Awaiter {
-    UringExecutor *executor;
-    Operation operation;
-    bool submitFailed{false};
-    size_t expectedBytes;
-
-    bool await_ready() const { return false; }
-    bool await_suspend(std::coroutine_handle<> continuation) {
-      operation.continuation = continuation;
-      auto status = executor->submit(&operation);
-      if (!status.ok()) {
-        submitFailed = true;
-        return false;
-      }
-      return true;
-    }
-    Result<int32_t> await_resume() {
-      if (submitFailed) {
-        return Status::IoError("io_uring writev submit failed");
-      }
-      if (operation.result < 0) {
-        return Status::IoError("io_uring writev failed: " + std::string(std::strerror(-operation.result)));
-      }
-      if (static_cast<size_t>(operation.result) != expectedBytes) {
-        return Status::IoError("io_uring writev completed short");
-      }
-      return operation.result;
-    }
-  };
-
-  io_uring_sqe sqe{};
-  sqe.opcode = IORING_OP_WRITEV;
-  sqe.fd = fd;
-  sqe.addr = reinterpret_cast<uint64_t>(iovecs.data());
-  sqe.len = static_cast<uint32_t>(iovecs.size());
-  sqe.off = offset;
-
-  auto result = co_await Awaiter{
-      .executor = this,
-      .operation =
-          Operation{
-              .sqe = sqe,
-              .continuation = {},
-              .result = 0,
-          },
-      .submitFailed = false,
-      .expectedBytes = expectedBytes,
-  };
-  if (!result) {
-    co_return result.error();
-  }
-  co_return Status::Ok();
-}
-
 Task<Status> UringExecutor::WritevAndFDataSync(int fd,
                                                std::span<const iovec> iovecs,
                                                uint64_t offset,

@@ -72,8 +72,7 @@ Result<std::unique_ptr<DB>> DB::Open(std::string path, Options options) {
     return executor.error();
   }
 
-  std::unique_ptr<DB> db(
-      new DB(std::move(path), fd, std::make_unique<io::UringExecutor>(std::move(executor).value()), options));
+  std::unique_ptr<DB> db(new DB(fd, std::make_unique<io::UringExecutor>(std::move(executor).value()), options));
   db->uringExecutorCreations_ = 1;
   auto status = db->recover();
   if (!status.ok()) {
@@ -82,10 +81,8 @@ Result<std::unique_ptr<DB>> DB::Open(std::string path, Options options) {
   return db;
 }
 
-DB::DB(std::string path, int walFd, std::unique_ptr<io::UringExecutor> executor, Options options)
-    : path_(std::move(path)),
-      walPath_((std::filesystem::path(path_) / "wal.log").string()),
-      walFd_(walFd),
+DB::DB(int walFd, std::unique_ptr<io::UringExecutor> executor, Options options)
+    : walFd_(walFd),
       executor_(std::move(executor)),
       groupCommitWindowMicros_(options.groupCommitWindowMicros),
       groupCommitTargetSize_(options.groupCommitTargetSize),
@@ -223,7 +220,6 @@ bool DB::enqueueAsyncWriter(Writer *writer) {
     ++writeGroups_;
     maxWriteGroupSize_ = std::max(maxWriteGroupSize_, uint64_t{1});
     writer->status = status;
-    writer->done = true;
     writing_ = false;
   }
   writerCv_.notify_one();
@@ -270,7 +266,6 @@ void DB::writerLoop() {
       maxWriteGroupSize_ = std::max(maxWriteGroupSize_, static_cast<uint64_t>(group.size()));
       for (auto *groupWriter : group) {
         groupWriter->status = status;
-        groupWriter->done = true;
         if (groupWriter->continuation) {
           continuations.push_back(groupWriter->continuation);
         }

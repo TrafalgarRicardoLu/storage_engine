@@ -36,7 +36,6 @@ class UringExecutor {
   UringExecutor &operator=(const UringExecutor &) = delete;
   ~UringExecutor();
 
-  Task<Status> WritevAt(int fd, std::span<const iovec> iovecs, uint64_t offset, size_t expectedBytes);
   Task<Status> WritevAndFDataSync(int fd, std::span<const iovec> iovecs, uint64_t offset, size_t expectedBytes);
   Task<Result<size_t>> ReadAt(int fd, std::span<std::byte> buffer, uint64_t offset);
   Task<Status> FDataSync(int fd);
