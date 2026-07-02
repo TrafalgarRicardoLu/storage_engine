@@ -202,6 +202,11 @@ void testConcurrentWritesUseGroupCommitWindow() {
   assert(stats.memtableApplyLocks < kThreads);
   assert(stats.groupCommitTargetSize == 8);
   assert(stats.groupCommitWindowMicros == 100);
+  assert(stats.adaptiveGroupCommitEnabled);
+  assert(stats.highPressureGroupCommitTargetSize == 16);
+  assert(stats.highPressureGroupCommitWindowMicros == 200);
+  assert(stats.highPressureGroupCommitQueueThreshold == 10);
+  assert(stats.adaptiveGroupCommitWaits > 0);
 }
 
 void testWalEncodedBatchSizeMatchesRecord() {

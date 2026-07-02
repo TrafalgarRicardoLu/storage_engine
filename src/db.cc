@@ -89,6 +89,10 @@ DB::DB(std::string path, int walFd, std::unique_ptr<io::UringExecutor> executor,
       executor_(std::move(executor)),
       groupCommitWindowMicros_(options.groupCommitWindowMicros),
       groupCommitTargetSize_(options.groupCommitTargetSize),
+      adaptiveGroupCommit_(options.adaptiveGroupCommit),
+      highPressureGroupCommitWindowMicros_(options.highPressureGroupCommitWindowMicros),
+      highPressureGroupCommitTargetSize_(options.highPressureGroupCommitTargetSize),
+      highPressureGroupCommitQueueThreshold_(options.highPressureGroupCommitQueueThreshold),
       walRecord_(std::make_unique<wal::EncodedBatchFragments>()) {
   memtable_.reserve(kInitialMemtableReserve);
   writerThread_ = std::thread(&DB::writerLoop, this);
@@ -166,6 +170,11 @@ DB::DebugStats DB::DebugStatsForTest() const {
     stats.groupCommitWaits = groupCommitWaits_;
     stats.groupCommitWindowMicros = groupCommitWindowMicros_;
     stats.groupCommitTargetSize = groupCommitTargetSize_;
+    stats.adaptiveGroupCommitEnabled = adaptiveGroupCommit_;
+    stats.adaptiveGroupCommitWaits = adaptiveGroupCommitWaits_;
+    stats.highPressureGroupCommitWindowMicros = highPressureGroupCommitWindowMicros_;
+    stats.highPressureGroupCommitTargetSize = highPressureGroupCommitTargetSize_;
+    stats.highPressureGroupCommitQueueThreshold = highPressureGroupCommitQueueThreshold_;
     stats.writeGroups = writeGroups_;
     stats.maxWriteGroupSize = maxWriteGroupSize_;
     stats.writerThreadDrains = writerThreadDrains_;
@@ -234,8 +243,15 @@ void DB::writerLoop() {
       if (groupCommitArmed_ || writers_.size() > 1) {
         groupCommitArmed_ = false;
         ++groupCommitWaits_;
-        writerCv_.wait_for(lock, std::chrono::microseconds(groupCommitWindowMicros_), [this] {
-          return stopWriter_ || writers_.size() >= groupCommitTargetSize_;
+        auto waitMicros = groupCommitWindowMicros_;
+        auto targetSize = groupCommitTargetSize_;
+        if (adaptiveGroupCommit_ && writers_.size() >= highPressureGroupCommitQueueThreshold_) {
+          waitMicros = highPressureGroupCommitWindowMicros_;
+          targetSize = highPressureGroupCommitTargetSize_;
+          ++adaptiveGroupCommitWaits_;
+        }
+        writerCv_.wait_for(lock, std::chrono::microseconds(waitMicros), [this, targetSize] {
+          return stopWriter_ || writers_.size() >= targetSize;
         });
       }
       while (!writers_.empty()) {

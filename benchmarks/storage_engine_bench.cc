@@ -33,6 +33,10 @@ struct Options {
   uint32_t uringSqPollIdleMs{2000};
   uint64_t groupCommitWindowMicros{100};
   size_t groupCommitTargetSize{8};
+  bool adaptiveGroupCommit{true};
+  uint64_t highPressureGroupCommitWindowMicros{200};
+  size_t highPressureGroupCommitTargetSize{16};
+  size_t highPressureGroupCommitQueueThreshold{10};
 };
 
 struct Metrics {
@@ -100,7 +104,7 @@ void usage() {
             << "--benchmarks=fillseq,fillrandom,readrandom,overwrite,concurrent_fillseq,concurrent_readrandom "
             << "--db=/tmp/storage_engine_bench --num=100000 --reads=100000 "
             << "--threads=1 --key_size=16 --value_size=100 --uring_sqpoll=0 "
-            << "--group_commit_window_us=100 --group_commit_target_size=8\n";
+            << "--group_commit_window_us=100 --group_commit_target_size=8 --adaptive_group_commit=1\n";
 }
 
 bool parseArgs(int argc, char **argv, Options &options) {
@@ -169,6 +173,24 @@ bool parseArgs(int argc, char **argv, Options &options) {
         return false;
       }
       options.groupCommitTargetSize = static_cast<size_t>(parsed);
+    } else if (key == "adaptive_group_commit") {
+      if (!parseBool(value, options.adaptiveGroupCommit)) {
+        return false;
+      }
+    } else if (key == "high_pressure_group_commit_window_us") {
+      if (!parseUint64(value, options.highPressureGroupCommitWindowMicros)) {
+        return false;
+      }
+    } else if (key == "high_pressure_group_commit_target_size") {
+      if (!parseUint64(value, parsed) || parsed == 0 || parsed > std::numeric_limits<size_t>::max()) {
+        return false;
+      }
+      options.highPressureGroupCommitTargetSize = static_cast<size_t>(parsed);
+    } else if (key == "high_pressure_group_commit_queue_threshold") {
+      if (!parseUint64(value, parsed) || parsed == 0 || parsed > std::numeric_limits<size_t>::max()) {
+        return false;
+      }
+      options.highPressureGroupCommitQueueThreshold = static_cast<size_t>(parsed);
     } else {
       std::cerr << "unknown argument: " << arg << "\n";
       usage();
@@ -240,14 +262,19 @@ std::unique_ptr<storage_engine::DB> openFreshDb(const Options &options) {
   }
   std::filesystem::remove_all(options.db);
   std::filesystem::create_directories(options.db);
-  auto db = storage_engine::DB::Open(options.db,
-                                     storage_engine::DB::Options{
-                                         .uringSqPoll = options.uringSqPoll,
-                                         .uringEntries = 8,
-                                         .uringSqPollIdleMs = options.uringSqPollIdleMs,
-                                         .groupCommitWindowMicros = options.groupCommitWindowMicros,
-                                         .groupCommitTargetSize = options.groupCommitTargetSize,
-                                     });
+  auto db = storage_engine::DB::Open(
+      options.db,
+      storage_engine::DB::Options{
+          .uringSqPoll = options.uringSqPoll,
+          .uringEntries = 8,
+          .uringSqPollIdleMs = options.uringSqPollIdleMs,
+          .groupCommitWindowMicros = options.groupCommitWindowMicros,
+          .groupCommitTargetSize = options.groupCommitTargetSize,
+          .adaptiveGroupCommit = options.adaptiveGroupCommit,
+          .highPressureGroupCommitWindowMicros = options.highPressureGroupCommitWindowMicros,
+          .highPressureGroupCommitTargetSize = options.highPressureGroupCommitTargetSize,
+          .highPressureGroupCommitQueueThreshold = options.highPressureGroupCommitQueueThreshold,
+      });
   if (!db) {
     std::cerr << "open db failed: " << db.error().message() << "\n";
     return nullptr;
@@ -444,6 +471,11 @@ bool benchConcurrentFillSeq(const Options &options) {
   std::cout << "  group_commit_waits: " << stats.groupCommitWaits << "\n";
   std::cout << "  group_commit_window_us: " << stats.groupCommitWindowMicros << "\n";
   std::cout << "  group_commit_target_size: " << stats.groupCommitTargetSize << "\n";
+  std::cout << "  adaptive_group_commit: " << (stats.adaptiveGroupCommitEnabled ? "true" : "false") << "\n";
+  std::cout << "  adaptive_group_commit_waits: " << stats.adaptiveGroupCommitWaits << "\n";
+  std::cout << "  high_pressure_group_commit_window_us: " << stats.highPressureGroupCommitWindowMicros << "\n";
+  std::cout << "  high_pressure_group_commit_target_size: " << stats.highPressureGroupCommitTargetSize << "\n";
+  std::cout << "  high_pressure_group_commit_queue_threshold: " << stats.highPressureGroupCommitQueueThreshold << "\n";
   std::cout << "  inline_writer_drains: " << stats.inlineWriterDrains << "\n";
   std::cout << "  writer_thread_drains: " << stats.writerThreadDrains << "\n";
   std::cout << "  memtable_apply_locks: " << stats.memtableApplyLocks << "\n";
@@ -546,6 +578,10 @@ int main(int argc, char **argv) {
   std::cout << "uring_sqpoll=" << (options.uringSqPoll ? "true" : "false") << "\n";
   std::cout << "group_commit_window_us=" << options.groupCommitWindowMicros << "\n";
   std::cout << "group_commit_target_size=" << options.groupCommitTargetSize << "\n";
+  std::cout << "adaptive_group_commit=" << (options.adaptiveGroupCommit ? "true" : "false") << "\n";
+  std::cout << "high_pressure_group_commit_window_us=" << options.highPressureGroupCommitWindowMicros << "\n";
+  std::cout << "high_pressure_group_commit_target_size=" << options.highPressureGroupCommitTargetSize << "\n";
+  std::cout << "high_pressure_group_commit_queue_threshold=" << options.highPressureGroupCommitQueueThreshold << "\n";
   std::cout << "sync=true\n\n";
 
   for (const auto &benchmark : split(options.benchmarks, ',')) {

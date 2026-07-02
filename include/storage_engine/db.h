@@ -59,6 +59,10 @@ class DB {
     uint32_t uringSqPollIdleMs{2000};
     uint64_t groupCommitWindowMicros{100};
     size_t groupCommitTargetSize{8};
+    bool adaptiveGroupCommit{true};
+    uint64_t highPressureGroupCommitWindowMicros{200};
+    size_t highPressureGroupCommitTargetSize{16};
+    size_t highPressureGroupCommitQueueThreshold{10};
   };
 
   struct DebugStats {
@@ -68,6 +72,11 @@ class DB {
     uint64_t groupCommitWaits{0};
     uint64_t groupCommitWindowMicros{0};
     size_t groupCommitTargetSize{0};
+    bool adaptiveGroupCommitEnabled{false};
+    uint64_t adaptiveGroupCommitWaits{0};
+    uint64_t highPressureGroupCommitWindowMicros{0};
+    size_t highPressureGroupCommitTargetSize{0};
+    size_t highPressureGroupCommitQueueThreshold{0};
     uint64_t writeGroups{0};
     uint64_t maxWriteGroupSize{0};
     uint64_t uringCompletionLoopCompletions{0};
@@ -152,6 +161,11 @@ class DB {
   uint64_t groupCommitWaits_{0};
   uint64_t groupCommitWindowMicros_{100};
   size_t groupCommitTargetSize_{8};
+  bool adaptiveGroupCommit_{true};
+  uint64_t adaptiveGroupCommitWaits_{0};
+  uint64_t highPressureGroupCommitWindowMicros_{200};
+  size_t highPressureGroupCommitTargetSize_{16};
+  size_t highPressureGroupCommitQueueThreshold_{10};
   uint64_t writeGroups_{0};
   uint64_t maxWriteGroupSize_{0};
   uint64_t writerThreadDrains_{0};
