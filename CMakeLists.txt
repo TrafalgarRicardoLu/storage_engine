@@ -39,6 +39,11 @@ target_link_libraries(storage_engine_tests
     storage_engine
 )
 
+target_include_directories(storage_engine_tests
+  PRIVATE
+    ${PROJECT_SOURCE_DIR}/src
+)
+
 add_test(NAME storage_engine_tests COMMAND storage_engine_tests)
 
 add_executable(storage_engine_bench

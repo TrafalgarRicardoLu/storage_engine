@@ -2,12 +2,14 @@
 #include <cassert>
 #include <filesystem>
 #include <fstream>
+#include <span>
 #include <string>
 #include <thread>
 #include <vector>
 
 #include "storage_engine/db.h"
 #include "storage_engine/task.h"
+#include "wal.h"
 
 namespace {
 
@@ -173,6 +175,25 @@ void testConcurrentWritesUseGroupCommitWindow() {
   assert(stats.maxWriteGroupSize > 1);
 }
 
+void testWalEncodedBatchSizeMatchesRecord() {
+  storage_engine::WriteBatch first;
+  first.Put("alpha", "one");
+  first.Delete("beta");
+  storage_engine::WriteBatch second;
+  second.Put("gamma", "three");
+
+  std::vector<const storage_engine::WriteBatch *> batches{&first, &second};
+  auto encoded = storage_engine::wal::EncodeBatch(42, batches);
+
+  assert(storage_engine::wal::EncodedBatchSize(batches) == encoded.size());
+  auto decoded = storage_engine::wal::DecodeLog(std::span<const std::byte>(encoded));
+  assert(decoded);
+  assert(decoded.value().validBytes == encoded.size());
+  assert(decoded.value().batches.size() == 1);
+  assert(decoded.value().batches[0].baseSequence == 42);
+  assert(decoded.value().batches[0].batch.entries().size() == 3);
+}
+
 storage_engine::Task<int> immediateValue() { co_return 7; }
 
 storage_engine::Task<int> nestedImmediateValue() {
@@ -195,6 +216,7 @@ int main() {
   testConcurrentWritesRecover();
   testAsyncWriteUsesCoroutineCompletionAndPersistentUring();
   testConcurrentWritesUseGroupCommitWindow();
+  testWalEncodedBatchSizeMatchesRecord();
   testNestedInlineTaskCompletesOnce();
   return 0;
 }

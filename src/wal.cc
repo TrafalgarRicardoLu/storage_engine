@@ -25,6 +25,12 @@ void putBytes(std::vector<std::byte> &out, std::string_view bytes) {
              reinterpret_cast<const std::byte *>(bytes.data() + bytes.size()));
 }
 
+void writeFixed32(std::vector<std::byte> &out, size_t offset, uint32_t value) {
+  for (int i = 0; i < 4; ++i) {
+    out[offset + static_cast<size_t>(i)] = static_cast<std::byte>((value >> (i * 8)) & 0xff);
+  }
+}
+
 bool readFixed32(std::span<const std::byte> bytes, size_t &offset, uint32_t &value) {
   if (offset + 4 > bytes.size()) {
     return false;
@@ -63,31 +69,45 @@ uint32_t crc32(std::span<const std::byte> bytes) {
 
 }  // namespace
 
+size_t EncodedBatchSize(const std::vector<const WriteBatch *> &batches) {
+  size_t size = 4 + 4 + 1 + 8 + 4;
+  for (auto *batch : batches) {
+    for (const auto &entry : batch->entries()) {
+      size += 1 + 4 + 4 + entry.key.size() + entry.value.size();
+    }
+  }
+  return size;
+}
+
 std::vector<std::byte> EncodeBatch(uint64_t baseSequence, const std::vector<const WriteBatch *> &batches) {
-  std::vector<std::byte> payload;
-  putFixed64(payload, baseSequence);
+  std::vector<std::byte> record;
+  record.reserve(EncodedBatchSize(batches));
+  putFixed32(record, 0);
+  putFixed32(record, 0);
+  record.push_back(static_cast<std::byte>(kBatchRecord));
+  auto payloadOffset = record.size();
+
+  putFixed64(record, baseSequence);
 
   uint32_t entryCount = 0;
   for (auto *batch : batches) {
     entryCount += static_cast<uint32_t>(batch->entries().size());
   }
-  putFixed32(payload, entryCount);
+  putFixed32(record, entryCount);
 
   for (auto *batch : batches) {
     for (const auto &entry : batch->entries()) {
-      payload.push_back(static_cast<std::byte>(entry.type));
-      putFixed32(payload, static_cast<uint32_t>(entry.key.size()));
-      putFixed32(payload, static_cast<uint32_t>(entry.value.size()));
-      putBytes(payload, entry.key);
-      putBytes(payload, entry.value);
+      record.push_back(static_cast<std::byte>(entry.type));
+      putFixed32(record, static_cast<uint32_t>(entry.key.size()));
+      putFixed32(record, static_cast<uint32_t>(entry.value.size()));
+      putBytes(record, entry.key);
+      putBytes(record, entry.value);
     }
   }
 
-  std::vector<std::byte> record;
-  putFixed32(record, crc32(payload));
-  putFixed32(record, static_cast<uint32_t>(payload.size()));
-  record.push_back(static_cast<std::byte>(kBatchRecord));
-  record.insert(record.end(), payload.begin(), payload.end());
+  auto payload = std::span<const std::byte>(record).subspan(payloadOffset);
+  writeFixed32(record, 0, crc32(payload));
+  writeFixed32(record, 4, static_cast<uint32_t>(payload.size()));
   return record;
 }
 

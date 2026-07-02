@@ -22,6 +22,7 @@ struct DecodeResult {
 };
 
 std::vector<std::byte> EncodeBatch(uint64_t baseSequence, const std::vector<const WriteBatch *> &batches);
+size_t EncodedBatchSize(const std::vector<const WriteBatch *> &batches);
 Result<DecodeResult> DecodeLog(std::span<const std::byte> bytes);
 
 }  // namespace storage_engine::wal
