@@ -62,6 +62,7 @@ Result<std::unique_ptr<DB>> DB::Open(std::string path, Options options) {
   if (!status.ok()) {
     return status;
   }
+  db->writerThread_ = std::thread(&DB::writerLoop, db.get());
   return db;
 }
 
@@ -76,9 +77,7 @@ DB::DB(int walFd, std::unique_ptr<io::UringExecutor> executor, Options options)
       highPressureGroupCommitQueueThreshold_(options.highPressureGroupCommitQueueThreshold),
       memtable_(std::make_unique<internal::MemTable>()),
       walRecord_(std::make_unique<wal::EncodedBatchFragments>()),
-      writeScratch_(std::make_unique<internal::WriteGroupScratch>()) {
-  writerThread_ = std::thread(&DB::writerLoop, this);
-}
+      writeScratch_(std::make_unique<internal::WriteGroupScratch>()) {}
 
 DB::~DB() {
   {
@@ -302,7 +301,9 @@ Status DB::recover() {
 
   uint64_t maxSequence = 0;
   for (const auto &batch : decoded.value().batches) {
-    applyBatch(batch.batch, batch.baseSequence);
+    writeScratch_->batches.clear();
+    writeScratch_->batches.push_back(&batch.batch);
+    memtable_->ApplyBatches(writeScratch_->batches, batch.baseSequence, writeScratch_->memtableUpdates);
     maxSequence = std::max(maxSequence, batch.baseSequence + batch.batch.entries().size());
   }
   nextSequence_ = std::max(nextSequence_, maxSequence + 1);
@@ -359,7 +360,7 @@ Status DB::writeGroup(const std::vector<Writer *> &writers) {
   }
 
   auto applyStart = std::chrono::steady_clock::now();
-  applyBatches(writers, baseSequence);
+  memtable_->ApplyBatches(writeScratch_->batches, baseSequence, writeScratch_->memtableUpdates);
   auto applyEnd = std::chrono::steady_clock::now();
 
   walOffset_ += walRecord_->size;
@@ -374,20 +375,6 @@ Status DB::writeGroup(const std::vector<Writer *> &writers) {
     writeGroupMemtableApplyMicros_ += elapsedMicros(applyStart, applyEnd);
   }
   return Status::Ok();
-}
-
-void DB::applyBatch(const WriteBatch &batch, uint64_t baseSequence) {
-  std::vector<const WriteBatch *> batches{&batch};
-  memtable_->ApplyBatches(batches, baseSequence, writeScratch_->memtableUpdates);
-}
-
-void DB::applyBatches(const std::vector<Writer *> &writers, uint64_t baseSequence) {
-  writeScratch_->batches.clear();
-  writeScratch_->batches.reserve(writers.size());
-  for (auto *writer : writers) {
-    writeScratch_->batches.push_back(writer->batch);
-  }
-  memtable_->ApplyBatches(writeScratch_->batches, baseSequence, writeScratch_->memtableUpdates);
 }
 
 }  // namespace storage_engine

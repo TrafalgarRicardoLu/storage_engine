@@ -153,8 +153,6 @@ class DB {
   bool enqueueAsyncWriter(Writer *writer);
   void writerLoop();
   Status writeGroup(const std::vector<Writer *> &writers);
-  void applyBatch(const WriteBatch &batch, uint64_t baseSequence);
-  void applyBatches(const std::vector<Writer *> &writers, uint64_t baseSequence);
 
   int walFd_{-1};
   std::unique_ptr<io::UringExecutor> executor_;
