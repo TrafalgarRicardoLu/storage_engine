@@ -159,12 +159,6 @@ size_t EncodedBatchSize(const std::vector<const WriteBatch *> &batches) {
   return size;
 }
 
-EncodedBatchFragments EncodeBatchFragments(uint64_t baseSequence, const std::vector<const WriteBatch *> &batches) {
-  EncodedBatchFragments encoded;
-  EncodeBatchFragmentsInto(baseSequence, batches, encoded);
-  return encoded;
-}
-
 void EncodeBatchFragmentsInto(uint64_t baseSequence,
                               const std::vector<const WriteBatch *> &batches,
                               EncodedBatchFragments &encoded) {
@@ -215,12 +209,6 @@ void EncodeBatchFragmentsInto(uint64_t baseSequence,
 
   writeFixed32(encoded.fixed, 0, ~crc);
   writeFixed32(encoded.fixed, 4, static_cast<uint32_t>(encoded.size - kRecordHeaderSize));
-}
-
-std::vector<std::byte> EncodeBatch(uint64_t baseSequence, const std::vector<const WriteBatch *> &batches) {
-  std::vector<std::byte> record;
-  EncodeBatchInto(baseSequence, batches, record);
-  return record;
 }
 
 void EncodeBatchInto(uint64_t baseSequence,

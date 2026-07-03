@@ -23,25 +23,6 @@ WriteBatch &WriteBatch::operator=(const WriteBatch &other) {
   return *this;
 }
 
-WriteBatch::WriteBatch(WriteBatch &&other)
-    : WriteBatch() {
-  for (const auto &entry : other.entries_) {
-    appendEntry(entry);
-  }
-  other.entries_.clear();
-}
-
-WriteBatch &WriteBatch::operator=(WriteBatch &&other) {
-  if (this != &other) {
-    entries_.clear();
-    for (const auto &entry : other.entries_) {
-      appendEntry(entry);
-    }
-    other.entries_.clear();
-  }
-  return *this;
-}
-
 void WriteBatch::Put(std::string_view key, std::string_view value) {
   entries_.push_back(Entry{
       .type = Type::kPut,

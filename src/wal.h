@@ -35,11 +35,9 @@ struct EncodedBatchFragments {
   size_t size{0};
 };
 
-std::vector<std::byte> EncodeBatch(uint64_t baseSequence, const std::vector<const WriteBatch *> &batches);
 void EncodeBatchInto(uint64_t baseSequence,
                      const std::vector<const WriteBatch *> &batches,
                      std::vector<std::byte> &record);
-EncodedBatchFragments EncodeBatchFragments(uint64_t baseSequence, const std::vector<const WriteBatch *> &batches);
 void EncodeBatchFragmentsInto(uint64_t baseSequence,
                               const std::vector<const WriteBatch *> &batches,
                               EncodedBatchFragments &encoded);

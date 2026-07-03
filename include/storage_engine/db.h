@@ -51,8 +51,6 @@ class WriteBatch {
   WriteBatch();
   WriteBatch(const WriteBatch &other);
   WriteBatch &operator=(const WriteBatch &other);
-  WriteBatch(WriteBatch &&other);
-  WriteBatch &operator=(WriteBatch &&other);
 
   void Put(std::string_view key, std::string_view value);
   void Delete(std::string_view key);

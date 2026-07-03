@@ -98,9 +98,9 @@ struct DB::WriteAwaiter {
   WriteBatch batch;
   Writer writer;
 
-  WriteAwaiter(DB *db, WriteBatch batch)
+  WriteAwaiter(DB *db, const WriteBatch &input)
       : db(db),
-        batch(std::move(batch)),
+        batch(input),
         writer(Writer{
             .batch = &this->batch,
             .status = Status::Ok(),
@@ -118,16 +118,16 @@ struct DB::WriteAwaiter {
 Task<Status> DB::PutAsync(std::string_view key, std::string_view value) {
   WriteBatch batch;
   batch.Put(key, value);
-  co_return co_await WriteAwaiter(this, std::move(batch));
+  co_return co_await WriteAwaiter(this, batch);
 }
 
 Task<Status> DB::DeleteAsync(std::string_view key) {
   WriteBatch batch;
   batch.Delete(key);
-  co_return co_await WriteAwaiter(this, std::move(batch));
+  co_return co_await WriteAwaiter(this, batch);
 }
 
-Task<Status> DB::WriteAsync(WriteBatch batch) { co_return co_await WriteAwaiter(this, std::move(batch)); }
+Task<Status> DB::WriteAsync(WriteBatch batch) { co_return co_await WriteAwaiter(this, batch); }
 
 Task<Result<std::string>> DB::GetAsync(std::string_view key) { co_return Get(key); }
 
@@ -135,10 +135,7 @@ Status DB::Put(std::string_view key, std::string_view value) { return PutAsync(k
 
 Status DB::Delete(std::string_view key) { return DeleteAsync(key).run(); }
 
-Status DB::Write(const WriteBatch &batch) {
-  WriteBatch copy = batch;
-  return WriteAsync(std::move(copy)).run();
-}
+Status DB::Write(const WriteBatch &batch) { return WriteAsync(batch).run(); }
 
 DB::DebugStats DB::DebugStatsForTest() const {
   DebugStats stats;

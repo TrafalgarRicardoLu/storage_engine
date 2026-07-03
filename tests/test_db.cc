@@ -137,7 +137,7 @@ void testAsyncWriteUsesCoroutineCompletionAndPersistentUring() {
   storage_engine::WriteBatch batch;
   batch.Put("async_key", "async_value");
 
-  auto status = db->WriteAsync(std::move(batch)).run();
+  auto status = db->WriteAsync(batch).run();
   assert(status.ok());
   assert(db->Get("async_key").value() == "async_value");
 
@@ -246,7 +246,8 @@ void testWalEncodedBatchSizeMatchesRecord() {
   second.Put("gamma", "three");
 
   std::vector<const storage_engine::WriteBatch *> batches{&first, &second};
-  auto encoded = storage_engine::wal::EncodeBatch(42, batches);
+  std::vector<std::byte> encoded;
+  storage_engine::wal::EncodeBatchInto(42, batches, encoded);
 
   assert(storage_engine::wal::EncodedBatchSize(batches) == encoded.size());
   auto decoded = storage_engine::wal::DecodeLog(std::span<const std::byte>(encoded));
@@ -293,8 +294,10 @@ void testWalFragmentEncodingMatchesContiguousRecord() {
   second.Put("gamma", "three");
 
   std::vector<const storage_engine::WriteBatch *> batches{&first, &second};
-  auto contiguous = storage_engine::wal::EncodeBatch(7, batches);
-  auto fragmented = storage_engine::wal::EncodeBatchFragments(7, batches);
+  std::vector<std::byte> contiguous;
+  storage_engine::wal::EncodeBatchInto(7, batches, contiguous);
+  storage_engine::wal::EncodedBatchFragments fragmented;
+  storage_engine::wal::EncodeBatchFragmentsInto(7, batches, fragmented);
 
   assert(fragmented.size == contiguous.size());
   assert(fragmented.iovecs.size() > 1);
