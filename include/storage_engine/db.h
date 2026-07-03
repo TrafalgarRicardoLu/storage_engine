@@ -10,11 +10,9 @@
 #include <memory>
 #include <memory_resource>
 #include <mutex>
-#include <shared_mutex>
 #include <string>
 #include <string_view>
 #include <thread>
-#include <unordered_map>
 #include <vector>
 
 #include "storage_engine/status.h"
@@ -29,6 +27,11 @@ class UringExecutor;
 namespace wal {
 struct EncodedBatchFragments;
 }
+
+namespace internal {
+class MemTable;
+struct WriteGroupScratch;
+}  // namespace internal
 
 class WriteBatch {
  public:
@@ -134,25 +137,6 @@ class DB {
   DebugStats DebugStatsForTest() const;
 
  private:
-  static constexpr size_t kMemtableShardCount = 16;
-
-  struct MemEntry {
-    uint64_t sequence{0};
-    bool deleted{false};
-    std::string value;
-  };
-
-  struct TransparentStringHash {
-    using is_transparent = void;
-    size_t operator()(std::string_view value) const noexcept { return std::hash<std::string_view>{}(value); }
-    size_t operator()(const std::string &value) const noexcept { return std::hash<std::string_view>{}(value); }
-  };
-
-  struct TransparentStringEqual {
-    using is_transparent = void;
-    bool operator()(std::string_view lhs, std::string_view rhs) const noexcept { return lhs == rhs; }
-  };
-
   struct WriteAwaiter;
 
   static constexpr size_t kCacheLineSize = 64;
@@ -163,22 +147,6 @@ class DB {
     std::coroutine_handle<> continuation;
   };
 
-  struct PendingMemtableUpdate {
-    const WriteBatch::Entry *entry{nullptr};
-    uint64_t sequence{0};
-  };
-
-  struct MemtableShard {
-    mutable std::shared_mutex mutex;
-    std::unordered_map<std::string, MemEntry, TransparentStringHash, TransparentStringEqual> entries;
-  };
-
-  struct WriteGroupScratch {
-    std::vector<const WriteBatch *> batches;
-    std::array<std::vector<PendingMemtableUpdate>, kMemtableShardCount> memtableUpdates;
-    std::vector<std::byte> fallbackRecord;
-  };
-
   DB(int walFd, std::unique_ptr<io::UringExecutor> executor, Options options);
 
   Status recover();
@@ -187,7 +155,6 @@ class DB {
   Status writeGroup(const std::vector<Writer *> &writers);
   void applyBatch(const WriteBatch &batch, uint64_t baseSequence);
   void applyBatches(const std::vector<Writer *> &writers, uint64_t baseSequence);
-  size_t memtableShard(std::string_view key) const;
 
   int walFd_{-1};
   std::unique_ptr<io::UringExecutor> executor_;
@@ -224,12 +191,10 @@ class DB {
   bool stopWriter_{false};
   std::thread writerThread_;
 
-  std::atomic<uint64_t> memtableApplyLocks_{0};
-  std::atomic<uint64_t> memtableApplyShardLocks_{0};
-  std::array<MemtableShard, kMemtableShardCount> memtableShards_;
+  std::unique_ptr<internal::MemTable> memtable_;
 
   std::unique_ptr<wal::EncodedBatchFragments> walRecord_;
-  WriteGroupScratch writeScratch_;
+  std::unique_ptr<internal::WriteGroupScratch> writeScratch_;
   std::vector<std::coroutine_handle<>> continuationsScratch_;
 };
 

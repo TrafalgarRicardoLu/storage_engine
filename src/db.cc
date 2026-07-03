@@ -12,12 +12,12 @@
 #include <span>
 
 #include "io/uring_executor.h"
+#include "memtable.h"
 #include "wal.h"
+#include "write_group_scratch.h"
 
 namespace storage_engine {
 namespace {
-
-constexpr size_t kInitialMemtableReserve = 4096;
 
 std::string errnoMessage(std::string_view operation) { return std::string(operation) + ": " + std::strerror(errno); }
 
@@ -35,70 +35,6 @@ Result<uint64_t> fileSize(int fd) {
 }
 
 }  // namespace
-
-WriteBatch::WriteBatch()
-    : arena_(inlineArena_.data(), inlineArena_.size()),
-      entries_(&arena_) {}
-
-WriteBatch::WriteBatch(const WriteBatch &other)
-    : WriteBatch() {
-  for (const auto &entry : other.entries_) {
-    appendEntry(entry);
-  }
-}
-
-WriteBatch &WriteBatch::operator=(const WriteBatch &other) {
-  if (this != &other) {
-    entries_.clear();
-    for (const auto &entry : other.entries_) {
-      appendEntry(entry);
-    }
-  }
-  return *this;
-}
-
-WriteBatch::WriteBatch(WriteBatch &&other)
-    : WriteBatch() {
-  for (const auto &entry : other.entries_) {
-    appendEntry(entry);
-  }
-  other.entries_.clear();
-}
-
-WriteBatch &WriteBatch::operator=(WriteBatch &&other) {
-  if (this != &other) {
-    entries_.clear();
-    for (const auto &entry : other.entries_) {
-      appendEntry(entry);
-    }
-    other.entries_.clear();
-  }
-  return *this;
-}
-
-void WriteBatch::Put(std::string_view key, std::string_view value) {
-  entries_.push_back(Entry{
-      .type = Type::kPut,
-      .key = ArenaString(key, &arena_),
-      .value = ArenaString(value, &arena_),
-  });
-}
-
-void WriteBatch::Delete(std::string_view key) {
-  entries_.push_back(Entry{
-      .type = Type::kDelete,
-      .key = ArenaString(key, &arena_),
-      .value = ArenaString(&arena_),
-  });
-}
-
-void WriteBatch::appendEntry(const Entry &entry) {
-  entries_.push_back(Entry{
-      .type = entry.type,
-      .key = ArenaString(std::string_view(entry.key.data(), entry.key.size()), &arena_),
-      .value = ArenaString(std::string_view(entry.value.data(), entry.value.size()), &arena_),
-  });
-}
 
 Result<std::unique_ptr<DB>> DB::Open(std::string path) { return Open(std::move(path), Options{}); }
 
@@ -138,10 +74,9 @@ DB::DB(int walFd, std::unique_ptr<io::UringExecutor> executor, Options options)
       highPressureGroupCommitWindowMicros_(options.highPressureGroupCommitWindowMicros),
       highPressureGroupCommitTargetSize_(options.highPressureGroupCommitTargetSize),
       highPressureGroupCommitQueueThreshold_(options.highPressureGroupCommitQueueThreshold),
-      walRecord_(std::make_unique<wal::EncodedBatchFragments>()) {
-  for (auto &shard : memtableShards_) {
-    shard.entries.reserve(kInitialMemtableReserve / kMemtableShardCount);
-  }
+      memtable_(std::make_unique<internal::MemTable>()),
+      walRecord_(std::make_unique<wal::EncodedBatchFragments>()),
+      writeScratch_(std::make_unique<internal::WriteGroupScratch>()) {
   writerThread_ = std::thread(&DB::writerLoop, this);
 }
 
@@ -237,14 +172,12 @@ DB::DebugStats DB::DebugStatsForTest() const {
     stats.writerResumeMicros = writerResumeMicros_;
     stats.writeGroupScratchReuses = writeGroupScratchReuses_.load(std::memory_order_relaxed);
   }
-  stats.memtableShardCount = memtableShards_.size();
-  for (const auto &shard : memtableShards_) {
-    std::shared_lock lock(shard.mutex);
-    stats.memtableReservedBuckets += shard.entries.bucket_count();
-    stats.memtableEntries += shard.entries.size();
-  }
-  stats.memtableApplyLocks = memtableApplyLocks_.load(std::memory_order_relaxed);
-  stats.memtableApplyShardLocks = memtableApplyShardLocks_.load(std::memory_order_relaxed);
+  auto memStats = memtable_->Stats();
+  stats.memtableApplyLocks = memStats.applyLocks;
+  stats.memtableApplyShardLocks = memStats.applyShardLocks;
+  stats.memtableReservedBuckets = memStats.reservedBuckets;
+  stats.memtableShardCount = memStats.shardCount;
+  stats.memtableEntries = memStats.entries;
   stats.uringCompletionLoopCompletions = executorStats.completionLoopCompletions;
   return stats;
 }
@@ -343,15 +276,7 @@ void DB::writerLoop() {
   }
 }
 
-Result<std::string> DB::Get(std::string_view key) {
-  auto &shard = memtableShards_[memtableShard(key)];
-  std::shared_lock lock(shard.mutex);
-  auto iter = shard.entries.find(key);
-  if (iter == shard.entries.end() || iter->second.deleted) {
-    return Status::NotFound("key not found");
-  }
-  return iter->second.value;
-}
+Result<std::string> DB::Get(std::string_view key) { return memtable_->Get(key); }
 
 Status DB::recover() {
   auto size = fileSize(walFd_);
@@ -396,14 +321,14 @@ Status DB::recover() {
 
 Status DB::writeGroup(const std::vector<Writer *> &writers) {
   auto groupStart = std::chrono::steady_clock::now();
-  if (writeScratch_.batches.capacity() > 0) {
+  if (writeScratch_->batches.capacity() > 0) {
     writeGroupScratchReuses_.fetch_add(1, std::memory_order_relaxed);
   }
-  writeScratch_.batches.clear();
-  writeScratch_.batches.reserve(writers.size());
+  writeScratch_->batches.clear();
+  writeScratch_->batches.reserve(writers.size());
   uint64_t entryCount = 0;
   for (auto *writer : writers) {
-    writeScratch_.batches.push_back(writer->batch);
+    writeScratch_->batches.push_back(writer->batch);
     entryCount += writer->batch->entries().size();
   }
 
@@ -412,16 +337,16 @@ Status DB::writeGroup(const std::vector<Writer *> &writers) {
   if (walRecord_->fixed.capacity() > 0 || walRecord_->iovecs.capacity() > 0) {
     ++walEncodeBufferReuses_;
   }
-  wal::EncodeBatchFragmentsInto(baseSequence, writeScratch_.batches, *walRecord_);
+  wal::EncodeBatchFragmentsInto(baseSequence, writeScratch_->batches, *walRecord_);
   std::span<const iovec> iovecs(walRecord_->iovecs);
   if (walRecord_->iovecs.size() > IOV_MAX) {
-    wal::EncodeBatchInto(baseSequence, writeScratch_.batches, writeScratch_.fallbackRecord);
+    wal::EncodeBatchInto(baseSequence, writeScratch_->batches, writeScratch_->fallbackRecord);
     walRecord_->iovecs.clear();
     walRecord_->iovecs.push_back(iovec{
-        .iov_base = writeScratch_.fallbackRecord.data(),
-        .iov_len = writeScratch_.fallbackRecord.size(),
+        .iov_base = writeScratch_->fallbackRecord.data(),
+        .iov_len = writeScratch_->fallbackRecord.size(),
     });
-    walRecord_->size = writeScratch_.fallbackRecord.size();
+    walRecord_->size = writeScratch_->fallbackRecord.size();
     iovecs = std::span<const iovec>(walRecord_->iovecs);
   }
   auto encodeEnd = std::chrono::steady_clock::now();
@@ -452,49 +377,17 @@ Status DB::writeGroup(const std::vector<Writer *> &writers) {
 }
 
 void DB::applyBatch(const WriteBatch &batch, uint64_t baseSequence) {
-  Writer writer{
-      .batch = &batch,
-      .status = Status::Ok(),
-      .continuation = {},
-  };
-  std::vector<Writer *> writers{&writer};
-  applyBatches(writers, baseSequence);
+  std::vector<const WriteBatch *> batches{&batch};
+  memtable_->ApplyBatches(batches, baseSequence, writeScratch_->memtableUpdates);
 }
 
 void DB::applyBatches(const std::vector<Writer *> &writers, uint64_t baseSequence) {
-  memtableApplyLocks_.fetch_add(1, std::memory_order_relaxed);
-  auto sequence = baseSequence;
+  writeScratch_->batches.clear();
+  writeScratch_->batches.reserve(writers.size());
   for (auto *writer : writers) {
-    for (const auto &entry : writer->batch->entries()) {
-      auto key = std::string_view(entry.key.data(), entry.key.size());
-      writeScratch_.memtableUpdates[memtableShard(key)].push_back(PendingMemtableUpdate{
-          .entry = &entry,
-          .sequence = sequence++,
-      });
-    }
+    writeScratch_->batches.push_back(writer->batch);
   }
-
-  for (size_t shardIndex = 0; shardIndex < writeScratch_.memtableUpdates.size(); ++shardIndex) {
-    auto &updates = writeScratch_.memtableUpdates[shardIndex];
-    if (updates.empty()) {
-      continue;
-    }
-    auto &shard = memtableShards_[shardIndex];
-    std::unique_lock lock(shard.mutex);
-    memtableApplyShardLocks_.fetch_add(1, std::memory_order_relaxed);
-    for (const auto &update : updates) {
-      auto &entry = *update.entry;
-      auto key = std::string_view(entry.key.data(), entry.key.size());
-      auto iter = shard.entries.try_emplace(std::string(key)).first;
-      auto &slot = iter->second;
-      slot.sequence = update.sequence;
-      slot.deleted = entry.type == WriteBatch::Type::kDelete;
-      slot.value.assign(entry.value.data(), entry.value.size());
-    }
-    updates.clear();
-  }
+  memtable_->ApplyBatches(writeScratch_->batches, baseSequence, writeScratch_->memtableUpdates);
 }
-
-size_t DB::memtableShard(std::string_view key) const { return TransparentStringHash{}(key) % kMemtableShardCount; }
 
 }  // namespace storage_engine

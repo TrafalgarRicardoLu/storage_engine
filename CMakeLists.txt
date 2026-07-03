@@ -15,7 +15,9 @@ enable_testing()
 add_library(storage_engine
   src/db.cc
   src/io/uring_executor.cc
+  src/memtable.cc
   src/wal.cc
+  src/write_batch.cc
 )
 
 target_include_directories(storage_engine
@@ -47,6 +49,7 @@ target_include_directories(storage_engine_tests
 add_test(NAME storage_engine_tests COMMAND storage_engine_tests)
 
 add_executable(storage_engine_bench
+  benchmarks/bench_common.cc
   benchmarks/storage_engine_bench.cc
 )
 
