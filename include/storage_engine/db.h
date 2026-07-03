@@ -1,6 +1,7 @@
 #pragma once
 
 #include <array>
+#include <atomic>
 #include <condition_variable>
 #include <coroutine>
 #include <cstddef>
@@ -108,6 +109,10 @@ class DB {
     uint64_t writeGroupMemtableApplyMicros{0};
     uint64_t writerResumeMicros{0};
     size_t memtableReservedBuckets{0};
+    size_t memtableShardCount{0};
+    size_t memtableEntries{0};
+    uint64_t memtableApplyShardLocks{0};
+    uint64_t writeGroupScratchReuses{0};
   };
 
   static Result<std::unique_ptr<DB>> Open(std::string path);
@@ -129,6 +134,8 @@ class DB {
   DebugStats DebugStatsForTest() const;
 
  private:
+  static constexpr size_t kMemtableShardCount = 16;
+
   struct MemEntry {
     uint64_t sequence{0};
     bool deleted{false};
@@ -156,6 +163,22 @@ class DB {
     std::coroutine_handle<> continuation;
   };
 
+  struct PendingMemtableUpdate {
+    const WriteBatch::Entry *entry{nullptr};
+    uint64_t sequence{0};
+  };
+
+  struct MemtableShard {
+    mutable std::shared_mutex mutex;
+    std::unordered_map<std::string, MemEntry, TransparentStringHash, TransparentStringEqual> entries;
+  };
+
+  struct WriteGroupScratch {
+    std::vector<const WriteBatch *> batches;
+    std::array<std::vector<PendingMemtableUpdate>, kMemtableShardCount> memtableUpdates;
+    std::vector<std::byte> fallbackRecord;
+  };
+
   DB(int walFd, std::unique_ptr<io::UringExecutor> executor, Options options);
 
   Status recover();
@@ -164,7 +187,7 @@ class DB {
   Status writeGroup(const std::vector<Writer *> &writers);
   void applyBatch(const WriteBatch &batch, uint64_t baseSequence);
   void applyBatches(const std::vector<Writer *> &writers, uint64_t baseSequence);
-  void applyBatchLocked(const WriteBatch &batch, uint64_t &sequence);
+  size_t memtableShard(std::string_view key) const;
 
   int walFd_{-1};
   std::unique_ptr<io::UringExecutor> executor_;
@@ -191,6 +214,7 @@ class DB {
   uint64_t writeGroupDurableWaitMicros_{0};
   uint64_t writeGroupMemtableApplyMicros_{0};
   uint64_t writerResumeMicros_{0};
+  std::atomic<uint64_t> writeGroupScratchReuses_{0};
 
   mutable std::mutex writeMutex_;
   std::condition_variable writerCv_;
@@ -200,13 +224,13 @@ class DB {
   bool stopWriter_{false};
   std::thread writerThread_;
 
-  mutable std::shared_mutex memMutex_;
-  uint64_t memtableApplyLocks_{0};
-  std::unordered_map<std::string, MemEntry, TransparentStringHash, TransparentStringEqual> memtable_;
+  std::atomic<uint64_t> memtableApplyLocks_{0};
+  std::atomic<uint64_t> memtableApplyShardLocks_{0};
+  std::array<MemtableShard, kMemtableShardCount> memtableShards_;
 
   std::unique_ptr<wal::EncodedBatchFragments> walRecord_;
-  std::vector<std::byte> walFallbackRecord_;
-  std::vector<const WriteBatch *> walBatchScratch_;
+  WriteGroupScratch writeScratch_;
+  std::vector<std::coroutine_handle<>> continuationsScratch_;
 };
 
 }  // namespace storage_engine

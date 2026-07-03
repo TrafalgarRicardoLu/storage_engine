@@ -169,6 +169,35 @@ void testWalEncodeBuffersAreReusedAcrossWrites() {
   assert(stats.writeGroupMemtableApplyMicros > 0);
 }
 
+void testMemtableShardsAndScratchAreUsed() {
+  auto dir = freshTestDir("memtable_shards");
+  auto db = storage_engine::DB::Open(dir.string()).value();
+
+  storage_engine::WriteBatch batch;
+  for (int i = 0; i < 128; ++i) {
+    batch.Put("key_" + std::to_string(i), "value_" + std::to_string(i));
+  }
+  batch.Delete("key_7");
+
+  assert(db->Write(batch).ok());
+  assert(db->Put("key_129", "value_129").ok());
+  for (int i = 0; i < 128; ++i) {
+    auto key = "key_" + std::to_string(i);
+    if (i == 7) {
+      assert(db->Get(key).error().code() == storage_engine::StatusCode::kNotFound);
+    } else {
+      assert(db->Get(key).value() == "value_" + std::to_string(i));
+    }
+  }
+  assert(db->Get("key_129").value() == "value_129");
+
+  auto stats = db->DebugStatsForTest();
+  assert(stats.memtableShardCount > 1);
+  assert(stats.memtableEntries == 129);
+  assert(stats.memtableApplyShardLocks > 1);
+  assert(stats.writeGroupScratchReuses > 0);
+}
+
 void testConcurrentWritesUseGroupCommitWindow() {
   auto dir = freshTestDir("group_commit_window");
   auto db = storage_engine::DB::Open(dir.string()).value();
@@ -294,6 +323,7 @@ int main() {
   testConcurrentWritesRecover();
   testAsyncWriteUsesCoroutineCompletionAndPersistentUring();
   testWalEncodeBuffersAreReusedAcrossWrites();
+  testMemtableShardsAndScratchAreUsed();
   testConcurrentWritesUseGroupCommitWindow();
   testWalEncodedBatchSizeMatchesRecord();
   testWalCrc32cMatchesStandardVector();
