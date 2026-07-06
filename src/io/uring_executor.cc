@@ -13,10 +13,10 @@
 #include <thread>
 #include <utility>
 
+#include "common.h"
+
 namespace storage_engine::io {
 namespace {
-
-std::string errnoMessage(std::string_view operation) { return std::string(operation) + ": " + std::strerror(errno); }
 
 uint32_t loadAcquire(uint32_t &value) { return std::atomic_ref<uint32_t>(value).load(std::memory_order_acquire); }
 
@@ -106,7 +106,7 @@ Status UringExecutor::wakeSqPollIfNeeded(State &state) {
   }
   auto ret = syscall(__NR_io_uring_enter, state.ringFd, 0, 0, IORING_ENTER_SQ_WAKEUP, nullptr, 0);
   if (ret < 0) {
-    return Status::IoError(errnoMessage("io_uring_enter sqpoll wakeup"));
+    return Status::IoError(internal::errnoMessage("io_uring_enter sqpoll wakeup"));
   }
   return Status::Ok();
 }
@@ -134,7 +134,7 @@ Status UringExecutor::submitRaw(State &state, io_uring_sqe source, uint64_t user
 
   auto ret = syscall(__NR_io_uring_enter, state.ringFd, 1, 0, 0, nullptr, 0);
   if (ret < 0) {
-    return Status::IoError(errnoMessage("io_uring_enter submit"));
+    return Status::IoError(internal::errnoMessage("io_uring_enter submit"));
   }
   return Status::Ok();
 }
@@ -204,7 +204,7 @@ Status UringExecutor::init(Options options) {
   }
   state_->ringFd = static_cast<int>(syscall(__NR_io_uring_setup, options.entries, &params));
   if (state_->ringFd < 0) {
-    auto status = Status::IoError(errnoMessage("io_uring_setup"));
+    auto status = Status::IoError(internal::errnoMessage("io_uring_setup"));
     state_.reset();
     return status;
   }
@@ -226,7 +226,7 @@ Status UringExecutor::init(Options options) {
                            IORING_OFF_SQ_RING);
   if (state_->sqRingPtr == MAP_FAILED) {
     state_->sqRingPtr = nullptr;
-    auto status = Status::IoError(errnoMessage("mmap sq ring"));
+    auto status = Status::IoError(internal::errnoMessage("mmap sq ring"));
     closeRing();
     return status;
   }
@@ -242,7 +242,7 @@ Status UringExecutor::init(Options options) {
                              IORING_OFF_CQ_RING);
     if (state_->cqRingPtr == MAP_FAILED) {
       state_->cqRingPtr = nullptr;
-      auto status = Status::IoError(errnoMessage("mmap cq ring"));
+      auto status = Status::IoError(internal::errnoMessage("mmap cq ring"));
       closeRing();
       return status;
     }
@@ -257,7 +257,7 @@ Status UringExecutor::init(Options options) {
                          IORING_OFF_SQES);
   if (state_->sqesPtr == MAP_FAILED) {
     state_->sqesPtr = nullptr;
-    auto status = Status::IoError(errnoMessage("mmap sqes"));
+    auto status = Status::IoError(internal::errnoMessage("mmap sqes"));
     closeRing();
     return status;
   }
@@ -321,7 +321,7 @@ Status UringExecutor::submitLinked(Operation *first, Operation *second) {
 
   auto ret = syscall(__NR_io_uring_enter, state_->ringFd, 2, 0, 0, nullptr, 0);
   if (ret < 0) {
-    return Status::IoError(errnoMessage("io_uring_enter submit linked"));
+    return Status::IoError(internal::errnoMessage("io_uring_enter submit linked"));
   }
   return Status::Ok();
 }

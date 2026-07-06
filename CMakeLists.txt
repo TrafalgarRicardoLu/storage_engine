@@ -13,6 +13,7 @@ find_package(Threads REQUIRED)
 enable_testing()
 
 add_library(storage_engine
+  src/common.cc
   src/db.cc
   src/io/uring_executor.cc
   src/memtable.cc

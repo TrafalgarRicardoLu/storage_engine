@@ -62,6 +62,8 @@ class MemTable {
     std::unordered_map<std::string, MemEntry, TransparentStringHash, TransparentStringEqual> entries;
   };
 
+  static constexpr size_t kInitialBucketsPerShard = 256;
+
   size_t shardFor(std::string_view key) const;
 
   std::atomic<uint64_t> applyLocks_{0};

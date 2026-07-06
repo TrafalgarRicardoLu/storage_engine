@@ -5,6 +5,8 @@
 #include <cstring>
 #include <string_view>
 
+#include "common.h"
+
 #if defined(__x86_64__) || defined(__i386__)
 #include <nmmintrin.h>
 #endif
@@ -17,58 +19,10 @@ constexpr size_t kRecordHeaderSize = 4 + 4 + 1;
 constexpr size_t kBatchHeaderSize = 8 + 4;
 constexpr size_t kEntryHeaderSize = 1 + 4 + 4;
 
-void putFixed32(std::vector<std::byte> &out, uint32_t value) {
-  for (int i = 0; i < 4; ++i) {
-    out.push_back(static_cast<std::byte>((value >> (i * 8)) & 0xff));
-  }
-}
-
-void putFixed64(std::vector<std::byte> &out, uint64_t value) {
-  for (int i = 0; i < 8; ++i) {
-    out.push_back(static_cast<std::byte>((value >> (i * 8)) & 0xff));
-  }
-}
-
 void putBytes(std::vector<std::byte> &out, std::string_view bytes) {
   out.insert(out.end(),
              reinterpret_cast<const std::byte *>(bytes.data()),
              reinterpret_cast<const std::byte *>(bytes.data() + bytes.size()));
-}
-
-void writeFixed32(std::vector<std::byte> &out, size_t offset, uint32_t value) {
-  for (int i = 0; i < 4; ++i) {
-    out[offset + static_cast<size_t>(i)] = static_cast<std::byte>((value >> (i * 8)) & 0xff);
-  }
-}
-
-void writeFixed64(std::vector<std::byte> &out, size_t offset, uint64_t value) {
-  for (int i = 0; i < 8; ++i) {
-    out[offset + static_cast<size_t>(i)] = static_cast<std::byte>((value >> (i * 8)) & 0xff);
-  }
-}
-
-bool readFixed32(std::span<const std::byte> bytes, size_t &offset, uint32_t &value) {
-  if (offset + 4 > bytes.size()) {
-    return false;
-  }
-  value = 0;
-  for (int i = 0; i < 4; ++i) {
-    value |= static_cast<uint32_t>(bytes[offset + i]) << (i * 8);
-  }
-  offset += 4;
-  return true;
-}
-
-bool readFixed64(std::span<const std::byte> bytes, size_t &offset, uint64_t &value) {
-  if (offset + 8 > bytes.size()) {
-    return false;
-  }
-  value = 0;
-  for (int i = 0; i < 8; ++i) {
-    value |= static_cast<uint64_t>(bytes[offset + i]) << (i * 8);
-  }
-  offset += 8;
-  return true;
 }
 
 constexpr std::array<uint32_t, 256> makeCrc32cTable() {
@@ -137,6 +91,14 @@ void appendIovec(std::vector<iovec> &iovecs, const void *data, size_t size) {
   });
 }
 
+uint32_t countEntries(const std::vector<const WriteBatch *> &batches) {
+  uint32_t count = 0;
+  for (auto *batch : batches) {
+    count += static_cast<uint32_t>(batch->entries().size());
+  }
+  return count;
+}
+
 }  // namespace
 
 uint32_t Crc32C(std::span<const std::byte> bytes) {
@@ -162,10 +124,7 @@ size_t EncodedBatchSize(const std::vector<const WriteBatch *> &batches) {
 void EncodeBatchFragmentsInto(uint64_t baseSequence,
                               const std::vector<const WriteBatch *> &batches,
                               EncodedBatchFragments &encoded) {
-  uint32_t entryCount = 0;
-  for (auto *batch : batches) {
-    entryCount += static_cast<uint32_t>(batch->entries().size());
-  }
+  auto entryCount = countEntries(batches);
 
   encoded.size = EncodedBatchSize(batches);
   encoded.fixed.clear();
@@ -174,8 +133,8 @@ void EncodeBatchFragmentsInto(uint64_t baseSequence,
   encoded.iovecs.reserve(2 + static_cast<size_t>(entryCount) * 3);
 
   encoded.fixed[8] = static_cast<std::byte>(kBatchRecord);
-  writeFixed64(encoded.fixed, kRecordHeaderSize, baseSequence);
-  writeFixed32(encoded.fixed, kRecordHeaderSize + 8, entryCount);
+  internal::writeFixed64LE(encoded.fixed, kRecordHeaderSize, baseSequence);
+  internal::writeFixed32LE(encoded.fixed, kRecordHeaderSize + 8, entryCount);
 
   auto crc = 0xffffffffu;
   auto batchHeader = std::span<const std::byte>(encoded.fixed).subspan(kRecordHeaderSize, kBatchHeaderSize);
@@ -188,8 +147,8 @@ void EncodeBatchFragmentsInto(uint64_t baseSequence,
     for (const auto &entry : batch->entries()) {
       auto *entryHeader = encoded.fixed.data() + entryHeaderOffset;
       entryHeader[0] = static_cast<std::byte>(entry.type);
-      writeFixed32(encoded.fixed, entryHeaderOffset + 1, static_cast<uint32_t>(entry.key.size()));
-      writeFixed32(encoded.fixed, entryHeaderOffset + 5, static_cast<uint32_t>(entry.value.size()));
+      internal::writeFixed32LE(encoded.fixed, entryHeaderOffset + 1, static_cast<uint32_t>(entry.key.size()));
+      internal::writeFixed32LE(encoded.fixed, entryHeaderOffset + 5, static_cast<uint32_t>(entry.value.size()));
 
       auto entryHeaderBytes = std::span<const std::byte>(entryHeader, kEntryHeaderSize);
       auto keyBytes =
@@ -207,8 +166,8 @@ void EncodeBatchFragmentsInto(uint64_t baseSequence,
     }
   }
 
-  writeFixed32(encoded.fixed, 0, ~crc);
-  writeFixed32(encoded.fixed, 4, static_cast<uint32_t>(encoded.size - kRecordHeaderSize));
+  internal::writeFixed32LE(encoded.fixed, 0, ~crc);
+  internal::writeFixed32LE(encoded.fixed, 4, static_cast<uint32_t>(encoded.size - kRecordHeaderSize));
 }
 
 void EncodeBatchInto(uint64_t baseSequence,
@@ -216,32 +175,27 @@ void EncodeBatchInto(uint64_t baseSequence,
                      std::vector<std::byte> &record) {
   record.clear();
   record.reserve(EncodedBatchSize(batches));
-  putFixed32(record, 0);
-  putFixed32(record, 0);
+  internal::appendFixed32LE(record, 0);
+  internal::appendFixed32LE(record, 0);
   record.push_back(static_cast<std::byte>(kBatchRecord));
   auto payloadOffset = record.size();
 
-  putFixed64(record, baseSequence);
-
-  uint32_t entryCount = 0;
-  for (auto *batch : batches) {
-    entryCount += static_cast<uint32_t>(batch->entries().size());
-  }
-  putFixed32(record, entryCount);
+  internal::appendFixed64LE(record, baseSequence);
+  internal::appendFixed32LE(record, countEntries(batches));
 
   for (auto *batch : batches) {
     for (const auto &entry : batch->entries()) {
       record.push_back(static_cast<std::byte>(entry.type));
-      putFixed32(record, static_cast<uint32_t>(entry.key.size()));
-      putFixed32(record, static_cast<uint32_t>(entry.value.size()));
+      internal::appendFixed32LE(record, static_cast<uint32_t>(entry.key.size()));
+      internal::appendFixed32LE(record, static_cast<uint32_t>(entry.value.size()));
       putBytes(record, entry.key);
       putBytes(record, entry.value);
     }
   }
 
   auto payload = std::span<const std::byte>(record).subspan(payloadOffset);
-  writeFixed32(record, 0, Crc32C(payload));
-  writeFixed32(record, 4, static_cast<uint32_t>(payload.size()));
+  internal::writeFixed32LE(record, 0, Crc32C(payload));
+  internal::writeFixed32LE(record, 4, static_cast<uint32_t>(payload.size()));
 }
 
 Result<DecodeResult> DecodeLog(std::span<const std::byte> bytes) {
@@ -252,7 +206,7 @@ Result<DecodeResult> DecodeLog(std::span<const std::byte> bytes) {
     auto recordOffset = offset;
     uint32_t expectedCrc = 0;
     uint32_t length = 0;
-    if (!readFixed32(bytes, offset, expectedCrc) || !readFixed32(bytes, offset, length)) {
+    if (!internal::readFixed32LE(bytes, offset, expectedCrc) || !internal::readFixed32LE(bytes, offset, length)) {
       break;
     }
     if (offset >= bytes.size()) {
@@ -277,8 +231,8 @@ Result<DecodeResult> DecodeLog(std::span<const std::byte> bytes) {
     DecodedBatch decoded;
     size_t payloadOffset = 0;
     uint32_t entryCount = 0;
-    if (!readFixed64(payload, payloadOffset, decoded.baseSequence) ||
-        !readFixed32(payload, payloadOffset, entryCount)) {
+    if (!internal::readFixed64LE(payload, payloadOffset, decoded.baseSequence) ||
+        !internal::readFixed32LE(payload, payloadOffset, entryCount)) {
       return Status::Corruption("invalid WAL batch header");
     }
 
@@ -289,7 +243,8 @@ Result<DecodeResult> DecodeLog(std::span<const std::byte> bytes) {
       auto typeByte = static_cast<uint8_t>(payload[payloadOffset++]);
       uint32_t keySize = 0;
       uint32_t valueSize = 0;
-      if (!readFixed32(payload, payloadOffset, keySize) || !readFixed32(payload, payloadOffset, valueSize)) {
+      if (!internal::readFixed32LE(payload, payloadOffset, keySize) ||
+          !internal::readFixed32LE(payload, payloadOffset, valueSize)) {
         return Status::Corruption("invalid WAL batch entry");
       }
       if (payloadOffset + keySize + valueSize > payload.size()) {

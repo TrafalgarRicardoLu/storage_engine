@@ -3,15 +3,10 @@
 #include <mutex>
 
 namespace storage_engine::internal {
-namespace {
-
-constexpr size_t kInitialReserve = 4096;
-
-}  // namespace
 
 MemTable::MemTable() {
   for (auto &shard : shards_) {
-    shard.entries.reserve(kInitialReserve / kShardCount);
+    shard.entries.reserve(kInitialBucketsPerShard);
   }
 }
 

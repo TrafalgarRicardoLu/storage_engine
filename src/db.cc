@@ -5,12 +5,11 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
-#include <algorithm>
 #include <chrono>
-#include <cstring>
 #include <filesystem>
 #include <span>
 
+#include "common.h"
 #include "io/uring_executor.h"
 #include "memtable.h"
 #include "wal.h"
@@ -19,17 +18,10 @@
 namespace storage_engine {
 namespace {
 
-std::string errnoMessage(std::string_view operation) { return std::string(operation) + ": " + std::strerror(errno); }
-
-uint64_t elapsedMicros(std::chrono::steady_clock::time_point start, std::chrono::steady_clock::time_point end) {
-  auto micros = std::chrono::duration_cast<std::chrono::microseconds>(end - start).count();
-  return micros > 0 ? static_cast<uint64_t>(micros) : 1;
-}
-
 Result<uint64_t> fileSize(int fd) {
   struct stat st {};
   if (fstat(fd, &st) != 0) {
-    return Status::IoError(errnoMessage("fstat"));
+    return Status::IoError(internal::errnoMessage("fstat"));
   }
   return static_cast<uint64_t>(st.st_size);
 }
@@ -43,7 +35,7 @@ Result<std::unique_ptr<DB>> DB::Open(std::string path, Options options) {
   auto walPath = (std::filesystem::path(path) / "wal.log").string();
   auto fd = open(walPath.c_str(), O_CREAT | O_RDWR | O_CLOEXEC, 0644);
   if (fd < 0) {
-    return Status::IoError(errnoMessage("open WAL"));
+    return Status::IoError(internal::errnoMessage("open WAL"));
   }
 
   auto executor = io::UringExecutor::Create(io::UringExecutor::Options{
@@ -267,7 +259,7 @@ void DB::writerLoop() {
     auto resumeEnd = std::chrono::steady_clock::now();
     if (!continuationsScratch_.empty()) {
       std::lock_guard lock(writeMutex_);
-      writerResumeMicros_ += elapsedMicros(resumeStart, resumeEnd);
+      writerResumeMicros_ += internal::elapsedMicros(resumeStart, resumeEnd);
     }
   }
 }
@@ -296,18 +288,19 @@ Status DB::recover() {
     return decoded.error();
   }
 
+  const auto &decodeResult = decoded.value();
   uint64_t maxSequence = 0;
-  for (const auto &batch : decoded.value().batches) {
+  for (const auto &batch : decodeResult.batches) {
     writeScratch_->batches.clear();
     writeScratch_->batches.push_back(&batch.batch);
     memtable_->ApplyBatches(writeScratch_->batches, batch.baseSequence, writeScratch_->memtableUpdates);
     maxSequence = std::max(maxSequence, batch.baseSequence + batch.batch.entries().size());
   }
   nextSequence_ = std::max(nextSequence_, maxSequence + 1);
-  walOffset_ = decoded.value().validBytes;
+  walOffset_ = decodeResult.validBytes;
   if (walOffset_ != bytes.size()) {
     if (ftruncate(walFd_, static_cast<off_t>(walOffset_)) != 0) {
-      return Status::IoError(errnoMessage("truncate WAL"));
+      return Status::IoError(internal::errnoMessage("truncate WAL"));
     }
     auto sync = executor_->FDataSync(walFd_).run();
     if (!sync.ok()) {
@@ -366,10 +359,10 @@ Status DB::writeGroup(const std::vector<Writer *> &writers) {
   {
     std::lock_guard lock(writeMutex_);
     ++writeGroupTimingSamples_;
-    writeGroupTotalMicros_ += elapsedMicros(groupStart, groupEnd);
-    writeGroupWalEncodeMicros_ += elapsedMicros(encodeStart, encodeEnd);
-    writeGroupDurableWaitMicros_ += elapsedMicros(durableStart, durableEnd);
-    writeGroupMemtableApplyMicros_ += elapsedMicros(applyStart, applyEnd);
+    writeGroupTotalMicros_ += internal::elapsedMicros(groupStart, groupEnd);
+    writeGroupWalEncodeMicros_ += internal::elapsedMicros(encodeStart, encodeEnd);
+    writeGroupDurableWaitMicros_ += internal::elapsedMicros(durableStart, durableEnd);
+    writeGroupMemtableApplyMicros_ += internal::elapsedMicros(applyStart, applyEnd);
   }
   return Status::Ok();
 }
