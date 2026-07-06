@@ -31,6 +31,19 @@ These are not implemented yet:
   secondary indexes.
 - Production crash-consistency coverage beyond the single WAL file path.
 
+## Future Goals
+
+- Explore an optional SPDK-backed WAL device after the current `io_uring` file
+  WAL path is abstracted behind a small storage backend interface. The goal is
+  to compare the existing filesystem-backed durable write path with a user-space
+  NVMe path, especially for group commit, flush latency, DMA-friendly buffers,
+  and coroutine completion integration.
+
+  SPDK is not a current dependency and is not required to build or run this
+  project. The existing `io_uring` backend remains the default until a suitable
+  NVMe, hugepage, and VFIO-capable environment is available for meaningful
+  testing.
+
 ## Build
 
 Requirements:
